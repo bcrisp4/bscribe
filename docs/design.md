@@ -13,7 +13,7 @@ bscribe is a self-hosted HTTP service that converts documents (PDFs, images) int
 
 ## Background
 
-I've re-implemented PDF-to-text extraction as hastily written scripts across several projects. Each new project that touches PDFs repeats the work, badly.
+I've re-implemented PDF-to-text extraction as hastily written scripts across several projects. Each new project that touches PDFs repeats the work - often badly.
 
 There's no system waiting on bscribe today, but a planned personal semantic search service ("bsearch") will need document text on its ingest path to compute embeddings. bsearch will likely have multiple ingestion connectors pulling documents from different places; all of them need the same PDF processing. bscribe keeps that capability in one service instead of re-implemented per connector.
 
@@ -28,7 +28,7 @@ There's also a privacy motivation: online converter sites are the easy alternati
 
 ## Non-goals
 
-- **No multi-user support.** Single user. No accounts, no tenants, no per-user quotas. Auth is at most one shared token.
+- **No multi-user support.** Single user. No accounts, no tenants, no per-user quotas. Auth is a small set of static bearer tokens — one per caller so each can be revoked independently — not user identity.
 - **No document storage.** bscribe is not a document store or DMS. Documents transit the service; results are retained briefly for async pickup only. Downstream services own their own storage.
 - **No semantic layer.** No embeddings, chunking, summarization, or entity extraction. Text/markdown out; downstream services own meaning.
 - **No hosted or commercial offering.** Open source on GitHub, but no hosted option and no commercial ambitions. Others self-host at their own risk.
@@ -184,7 +184,7 @@ Deliberately loose — one user, retry-friendly callers, zero revenue impact. Th
 | Metric | Target | Consequence for design |
 |---|---|---|
 | Availability | Best effort; unavailable for a day = fine. Callers retry | No HA, no replicas, single container, restart-on-failure is the whole story |
-| Callers | 1–3 internal services + occasional curl | Single shared bearer token; no rate limiting; no quotas |
+| Callers | 1–3 internal services + occasional curl | Static bearer tokens, one per caller; no rate limiting; no quotas |
 | Concurrent jobs | 4 (configurable; matches Pi 5 core count) | Worker pool default 4; SQLite uncontended at this scale |
 | Sync latency | p95 < 5s for a clean 10-page born-digital PDF on Pi 5 — unbenchmarked estimate (liteparse's Rust core should be sub-second; wide margin added); validate in M1 and adjust | Violation = bug tripwire, not tuning signal; no perf work planned |
 | Async throughput | No deadline. A job is done when it's done; CPU VLM OCR at ~0.1 pages/s later is acceptable | No queue tuning, no priorities, no job SLAs |
@@ -197,7 +197,7 @@ Exposure: bscribe listens only on the tailnet (`marlin-tet.ts.net`) or LAN behin
 Threat scenarios:
 
 - **Malicious/malformed document.** The realistic attack surface: PDFium and Tesseract are C/C++ libraries with a CVE history, fed untrusted bytes. Mitigations: container runs as non-root with a read-only root filesystem and no added capabilities; memory/CPU limits at the container level; documents come only from authenticated callers (me); worst case is contained to a service whose entire state is disposable (see SLOs — data loss = shrug).
-- **Leaked bearer token.** Second factor only — an attacker would also need tailnet access. Token rotation = restart with a new env var. The token never appears in logs or error responses.
+- **Leaked bearer token.** Second factor only — an attacker would also need tailnet access. Tokens are provisioned as static config (env/file), one named token per caller (e.g. `bsearch`, `adhoc`); revoking one caller = remove its token and restart, others unaffected. There is no token-management API — that would creep toward user accounts (see Non-goals). Tokens never appear in logs or error responses; the token *name* may appear in logs to attribute requests.
 - **Compromised tailnet device.** Any tailnet device can reach the API with the token. Accepted: bscribe holds no stored documents to exfiltrate; the blast radius is transient job results.
 - **SSRF via OCR endpoint.** The OCR server URL is operator-set config, not caller-supplied. No caller-controlled outbound requests exist in the API.
 
