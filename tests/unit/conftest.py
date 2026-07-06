@@ -14,6 +14,8 @@ def _isolate_bscribe_env(  # pyright: ignore[reportUnusedFunction]
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Strip ambient BSCRIBE_* env vars so a developer's shell can't skew tests."""
-    for name in os.environ:
+    # Snapshot the keys: delenv mutates os.environ immediately, and deleting
+    # while iterating it raises RuntimeError.
+    for name in list(os.environ):
         if name.startswith("BSCRIBE_"):
             monkeypatch.delenv(name)

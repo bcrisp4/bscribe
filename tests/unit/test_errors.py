@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import httpx
+import pytest
+import structlog
 from fastapi import FastAPI
 
 from bscribe.errors import problem_response, register_error_handlers
+from bscribe.log import configure_logging
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 PROBLEM_JSON = "application/problem+json"
 
@@ -81,6 +89,26 @@ class TestValidationErrors:
 
 
 class TestUnexpectedErrors:
+    @pytest.fixture(autouse=True)
+    def _reset_structlog(self) -> Iterator[None]:  # pyright: ignore[reportUnusedFunction]
+        yield
+        structlog.reset_defaults()
+
+    async def test_crash_log_line_carries_no_traceback_or_message(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Tracebacks and exception messages can quote parser internals or
+        user-supplied values; the 500 log line must carry neither."""
+        configure_logging("INFO")
+        async with make_client(make_test_app()) as client:
+            await client.get("/boom")
+
+        logged = capsys.readouterr().out
+        assert "unhandled_error" in logged
+        assert "RuntimeError" in logged  # error_type keyword survives
+        assert "secret-internals" not in logged
+        assert "Traceback" not in logged
+
     async def test_crash_is_500_problem_without_internals(self) -> None:
         async with make_client(make_test_app()) as client:
             response = await client.get("/boom")

@@ -24,4 +24,9 @@ section is renamed to the new version and becomes the GitHub Release notes.
   requests return `400`, and unexpected failures return `500` without leaking
   internal details.
 
+### Fixed
+
+- Unexpected errors are logged without tracebacks or exception messages, which
+  could quote parser internals or user-supplied values (privacy contract).
+
 [Unreleased]: https://github.com/bcrisp4/bscribe/commits/main

@@ -92,8 +92,10 @@ async def _handle_validation_error(request: Request, exc: Exception) -> Response
 
 
 async def _handle_unexpected_error(request: Request, exc: Exception) -> Response:
-    # Fixed detail: str(exc) could carry paths, filenames, or parser internals.
-    logger.exception(
+    # Type name only, no exc_info and no str(exc): tracebacks and exception
+    # messages can quote parser internals or user-supplied values, which the
+    # privacy contract keeps out of logs (see docs/design.md — Privacy).
+    logger.error(
         "unhandled_error",
         method=request.method,
         path=request.url.path,
