@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
@@ -52,9 +51,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             yield
         finally:
-            # close() blocks (SIGTERM -> 3s grace -> SIGKILL per wedged
-            # worker), so keep it off the event loop during shutdown.
-            await asyncio.to_thread(pool.close)
+            await pool.aclose()
 
     app = FastAPI(title="bscribe", lifespan=lifespan)
     app.state.settings = settings

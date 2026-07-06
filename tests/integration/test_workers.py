@@ -228,7 +228,7 @@ async def test_close_is_idempotent_and_rejects_further_parses(
 ) -> None:
     pool = _scripted_pool()
     await pool.parse(tmp_path / "ok", output=OutputFormat.MARKDOWN, ocr=OcrMode.OFF)
-    pool.close()
-    pool.close()
+    await pool.aclose()
+    pool.close()  # sync variant after async close must be a no-op too
     with pytest.raises(RuntimeError, match="closed"):
         await pool.parse(tmp_path / "ok", output=OutputFormat.MARKDOWN, ocr=OcrMode.OFF)

@@ -14,6 +14,18 @@ exception escape the worker unscrubbed: domain errors are re-raised with
 the cause chain severed, everything else is replaced by a
 ``WorkerCrashedError`` carrying only the exception's type name (verified
 against pebble 5.2.0).
+
+Concurrency model: ``WorkerPool`` needs no lock. All mutation of shared
+state (``_pool``, ``_closed``, ``metrics``) happens on the event loop
+thread — ``parse()`` and ``aclose()`` are coroutines, and only the
+*blocking* pool teardown is offloaded to a thread, never the state
+changes around it. Interleaving is therefore possible only at ``await``
+points: the pool swap in the rebuild path happens before its first
+``await``, so concurrent parses cannot double-rebuild, and the rebuild
+path re-checks ``_closed`` so a close during rebuild cannot resurrect a
+pool. The synchronous ``close()`` is for non-async callers (tests);
+async code must use ``aclose()``. If any of this moves off the loop
+thread, revisit.
 """
 
 from __future__ import annotations
@@ -160,6 +172,10 @@ class WorkerPool:
             # job from here on with /healthz still green. No cross-request
             # backoff: a persistently failing environment costs one pool
             # spawn per request, which the log event and counter surface.
+            if self._closed:
+                # The RuntimeError came from close() tearing the pool down,
+                # not from a broken pool — never rebuild after close.
+                raise RuntimeError("worker pool is closed") from None
             self.metrics.pool_rebuilds += 1
             logger.error("worker_pool_rebuilt")
             broken = self._pool
@@ -211,11 +227,21 @@ class WorkerPool:
             timeout=self._job_timeout_seconds,
         )
 
-    def close(self) -> None:
+    async def aclose(self) -> None:
         """Stop the pool, killing any running workers. Idempotent.
 
-        Blocking (up to ~3s per wedged worker) — from async code, call via
-        ``asyncio.to_thread`` (as the app lifespan does).
+        Flips ``_closed`` on the event loop thread (so in-flight parses
+        observe it reliably — see module docstring), then runs the
+        blocking teardown off-loop.
+        """
+        self._closed = True
+        await asyncio.to_thread(_teardown_pool, self._pool)
+
+    def close(self) -> None:
+        """Synchronous ``aclose`` for non-async callers. Idempotent.
+
+        Blocks the calling thread (up to ~3s per wedged worker); async
+        code must use ``aclose`` instead.
         """
         self._closed = True
         _teardown_pool(self._pool)
