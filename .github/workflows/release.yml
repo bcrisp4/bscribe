@@ -1,0 +1,96 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
+
+permissions: {}
+
+jobs:
+  release:
+    name: image + attestation + github release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write      # create the release
+      packages: write      # push image to GHCR
+      id-token: write      # OIDC for keyless attestation
+      attestations: write  # write attestations to GitHub
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Extract this tag's section from CHANGELOG.md as the release notes, so the
+      # curated changelog is the single source of truth. Fail fast if the section
+      # is missing rather than publishing empty notes (see docs/changelog.md).
+      - name: Extract release notes from CHANGELOG.md
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          version="${REF_NAME#v}"
+          notes="${RUNNER_TEMP}/notes.md"
+          # Stop on the next section header OR the link-reference block
+          # ([Unreleased]: ...) so a released section that is last in the file
+          # doesn't drag its link-def lines into the notes.
+          awk -v hdr="## [${version}]" '
+            index($0, hdr) == 1        { grab = 1; next }
+            grab && /^(## \[|\[)/       { grab = 0 }
+            grab                        { print }
+          ' CHANGELOG.md > "${notes}"
+          if ! grep -q '[^[:space:]]' "${notes}"; then
+            echo "::error::No CHANGELOG.md section found for ${version}. Add '## [${version}] - <date>' before tagging (see docs/changelog.md)."
+            exit 1
+          fi
+          echo "NOTES_FILE=${notes}" >> "${GITHUB_ENV}"
+          echo "VERSION=${version}" >> "${GITHUB_ENV}"
+
+      - uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
+
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5.7.0
+        with:
+          images: ghcr.io/bcrisp4/bscribe
+          # metadata-action handles prerelease gating natively: with the default
+          # flavor (latest=auto) the `latest` tag is added only for non-prerelease
+          # semver tags, and the {{major}}.{{minor}} pattern falls back to
+          # {{version}} on prereleases (no floating tag). No manual gating needed.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - id: build
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_BSCRIBE=${{ env.VERSION }}
+          sbom: true
+          provenance: mode=max
+
+      - name: Attest image provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-name: ghcr.io/bcrisp4/bscribe
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2.2.2
+        with:
+          body_path: ${{ env.NOTES_FILE }}
+          prerelease: ${{ contains(github.ref_name, '-') }}
