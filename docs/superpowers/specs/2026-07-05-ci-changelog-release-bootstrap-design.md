@@ -45,7 +45,7 @@ uv.lock
 src/bscribe/__init__.py
 src/bscribe/_version.py    # written by setuptools-scm at build time (gitignored)
 src/bscribe/app.py        # FastAPI app factory + GET /healthz only
-tests/unit/test_health.py
+tests/unit/test_app.py
 Dockerfile                # multi-stage, uv-based, non-root
 .dockerignore
 .gitignore
@@ -71,8 +71,8 @@ docs/releasing.md         # release runbook
   `build-backend = "setuptools.build_meta"`.
 - `[tool.setuptools_scm]`: `version_file = "src/bscribe/_version.py"`.
 - `[dependency-groups] dev`: `ruff`, `pyright`, `mypy`, `pytest`,
-  `pytest-asyncio`, `pytest-cov`, `pytest-xdist`, `httpx` (for the
-  `TestClient`).
+  `pytest-asyncio`, `pytest-cov`, `pytest-xdist`, `httpx` (the test drives the
+  app via `httpx.AsyncClient` + `ASGITransport`).
 - `[tool.ruff]`: `line-length = 88`, target `py314`. `[tool.ruff.lint]`
   `select` = the broad set from the Python style guide (`E F W I UP B SIM TCH
   RUF PTH ASYNC S T20 ARG FBT A C4 DTZ ISC PIE RSE RET TID`), with a
@@ -125,11 +125,15 @@ An `create_app() -> FastAPI` factory exposing a single unauthenticated
 `GET /healthz` returning `{"status": "ok"}`. This is scaffolding, not M1 —
 enough to give the test suite and the Dockerfile a real target.
 
-### `tests/unit/test_health.py`
+### `tests/unit/test_app.py`
 
-Arrange-Act-Assert test hitting `/healthz` through Starlette's `TestClient`,
-asserting `200` and the concrete body. Mirrors `src/` layout per the style
-guide. Drives the `create_app` factory into existence (TDD).
+Arrange-Act-Assert async test driving `/healthz` through
+`httpx.AsyncClient` over an `ASGITransport`, asserting `200` and the concrete
+body. `httpx.AsyncClient` is used rather than Starlette's `TestClient` because
+`TestClient`'s httpx-derived signatures resolve as partially-unknown under
+pyright strict (it warns to "install httpx2"), which would fail the typecheck
+job; the async form also matches `asyncio_mode = "auto"`. Mirrors `src/` layout
+per the style guide. Drives the `create_app` factory into existence (TDD).
 
 ### `Dockerfile`
 

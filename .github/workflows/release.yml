@@ -32,13 +32,16 @@ jobs:
         run: |
           version="${REF_NAME#v}"
           notes="${RUNNER_TEMP}/notes.md"
-          # Stop on the next section header OR the link-reference block
-          # ([Unreleased]: ...) so a released section that is last in the file
-          # doesn't drag its link-def lines into the notes.
+          # Stop on the next section header OR a link-reference DEFINITION
+          # (e.g. "[Unreleased]: https://...") so a released section that is
+          # last in the file doesn't drag its link-def lines into the notes.
+          # The link-def stop requires the "]:" shape so ordinary note text
+          # that merely starts with "[" (e.g. "[BREAKING] ...") is not treated
+          # as a boundary and does not truncate the release body.
           awk -v hdr="## [${version}]" '
-            index($0, hdr) == 1        { grab = 1; next }
-            grab && /^(## \[|\[)/       { grab = 0 }
-            grab                        { print }
+            index($0, hdr) == 1              { grab = 1; next }
+            grab && /^(## \[|\[[^]]*\]:)/     { grab = 0 }
+            grab                             { print }
           ' CHANGELOG.md > "${notes}"
           if ! grep -q '[^[:space:]]' "${notes}"; then
             echo "::error::No CHANGELOG.md section found for ${version}. Add '## [${version}] - <date>' before tagging (see docs/changelog.md)."
