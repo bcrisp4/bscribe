@@ -15,7 +15,7 @@ dependencies = [
 Homepage = "https://github.com/bcrisp4/bscribe"
 
 [build-system]
-requires = ["setuptools>=77", "setuptools-scm>=8"]
+requires = ["setuptools>=77", "setuptools-scm>=10.2.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
