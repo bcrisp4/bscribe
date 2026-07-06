@@ -5,7 +5,7 @@
 | Author | Ben Crisp (ben@thecrisp.io) |
 | Status | Draft |
 | Created | 2026-07-05 |
-| Updated | 2026-07-05 |
+| Updated | 2026-07-06 |
 
 ## Objective
 
@@ -141,7 +141,7 @@ PDFium and Tesseract appear by name because they are part of the untrusted-input
 
 The API is path-versioned (`/v1`). Breaking changes require `/v2`; additive changes (new optional params, new response fields) do not bump the version. This is the stability contract bsearch connectors rely on.
 
-Request parameters (both conversion endpoints): `file` (multipart, required), `output` = `markdown` (default) | `text`, `ocr` = `auto` (default, via liteparse complexity detection) | `force` | `off`.
+Request parameters (both conversion endpoints): `file` (multipart, required), `output` = `markdown` (default) | `text`, `ocr` = `auto` (default, via liteparse complexity detection) | `off`. (A `force` mode was dropped from v1 — see Closed issues; adding it back later is additive.)
 
 Accepted inputs: PDFs, images (jpg/png/gif/bmp/tiff/webp/svg, via ImageMagick), and office documents (Word/Excel/PowerPoint families incl. OpenDocument, RTF, CSV, Apple iWork — via LibreOffice). Unsupported formats get a `415`; supported formats that fail to parse get a `422` (sync) or a `failed` job (async).
 
@@ -168,7 +168,6 @@ Content-Type: multipart/form-data
   "content": "# Bank Statement\n\n| Date | Description | Amount |\n|---|---|---|\n| 2026-06-01 | ...",
   "metadata": {
     "pages": 3,
-    "ocr_used": false,
     "duration_ms": 412,
     "pipeline": {
       "fingerprint": "a41f7c2e9b03",
@@ -212,7 +211,7 @@ Callers (bsearch) store the whole `pipeline` block alongside each ingested docum
 1. Stored fingerprint == `GET /v1/info` fingerprint → nothing changed anywhere, done.
 2. Otherwise, per document, one uniform rule: **re-parse if any component on the document's stored path has a different current version.** OCR bumps never touch born-digital documents, LibreOffice bumps touch only office documents — no special cases per format.
 
-`ocr_used` remains in metadata as a quality signal (OCR text may deserve less trust downstream), but carries no re-ingestion logic. Occasional unnecessary re-parses — a traversed component bumped without changing output for that document — are accepted at single-user scale.
+An `ocr_used` quality signal (OCR text may deserve less trust downstream) is deferred — liteparse does not report it and deriving it proved costly (see Closed issues). It would carry no re-ingestion logic; adding it later is additive. Occasional unnecessary re-parses — a traversed component bumped without changing output for that document — are accepted at single-user scale.
 
 ### Admin CLI
 
@@ -278,7 +277,7 @@ Documents are the sensitive asset — bank statements, medical letters, IDs. Rul
 bscribe joins the existing Prometheus/Grafana stack. `/metrics` exposes:
 
 - HTTP request count + duration histograms, by endpoint and status
-- Jobs by state (gauge), job duration histogram split by `ocr_used`, queue depth
+- Jobs by state (gauge), job duration histogram (a split by OCR use returns with the deferred `ocr_used` signal — see Closed issues), queue depth
 - Worker pool health: counters for timeout kills, worker crashes, cancellations, recycles
 - A build/pipeline info metric carrying `pipeline_fingerprint` and component versions — a Grafana panel shows at a glance which pipeline version is live
 
@@ -292,7 +291,7 @@ Instrumentation via `prometheus-client` + FastAPI middleware. Alerting stays in 
 
 Ordered by ROI: each demoable, value before scaffolding.
 
-**M1 — sync converter.** `POST /v1/convert` (markdown/text out, `ocr=auto|force|off` via liteparse's built-in Tesseract), all input formats (PDF, images, office docs — container ships ImageMagick + LibreOffice), bearer token auth backed by the SQLite token table, the `bscribe` CLI (`serve`, `healthcheck`, `token add/list/delete`), `/healthz`, multi-arch container image, restrictive ImageMagick `policy.xml` (exact coder policy researched here — see Security), worker process pool (default 4, configurable) with per-job timeout. No job store yet — SQLite carries only tokens in M1. Demo: convert a real bank-statement scan and a `.docx` from curl on the tailnet. Measure office-conversion overhead on the Pi (unmeasured — see SLOs).
+**M1 — sync converter.** `POST /v1/convert` (markdown/text out, `ocr=auto|off` via liteparse's built-in Tesseract), all input formats (PDF, images, office docs — container ships ImageMagick + LibreOffice), bearer token auth backed by the SQLite token table, the `bscribe` CLI (`serve`, `healthcheck`, `token add/list/delete`), `/healthz`, multi-arch container image, restrictive ImageMagick `policy.xml` (exact coder policy researched here — see Security), worker process pool (default 4, configurable) with per-job timeout. No job store yet — SQLite carries only tokens in M1. Demo: convert a real bank-statement scan and a `.docx` from curl on the tailnet. Measure office-conversion overhead on the Pi (unmeasured — see SLOs).
 
 **M2 — async jobs.** SQLite job store, all `/v1/jobs` endpoints including list and cancellation of running jobs, TTL purge. Demo: submit a 100-page PDF, poll, fetch the result, watch it purge.
 
@@ -318,6 +317,8 @@ Backlog (unordered, from Missing features): web UI, webhooks if polling ever ann
 - **Does liteparse actually run on Pi 5 / arm64?** Resolved by testing on the target hardware (2026-07-05, `python:3.14-slim` arm64 container on the Pi 5 via podman): PyPI publishes a proper aarch64 manylinux wheel (liteparse 2.4.0, bundled `libpdfium.so`), born-digital parsing works (~10ms/page), `is_complex` works, bundled Tesseract OCR works with zero setup (~1.1s/page), and image input works once ImageMagick is installed in the container (hard external dependency, clear error without it).
 - **Threads or processes for the worker pool?** Resolved: **processes** — reversing an earlier threads decision. Threads were first chosen because liteparse's binding releases the GIL around parse calls (`py.detach()`, verified in `liteparse-python/src/lib.rs`), so thread parallelism is real and plumbing is zero. Reopened on failure-mode analysis: a thread wedged in a pathological native parse cannot be killed (the pool slot is lost until a container restart, with `/healthz` green throughout), and a segfault in PDFium/Tesseract/LibreOffice kills the API plus every in-flight job — and a caller auto-retrying a poison document turns that into a crash loop needing a human. A warm process pool (per-job timeout SIGKILL, per-job crash containment, worker recycling — pebble-style; stdlib pools rejected because `ProcessPoolExecutor` breaks the whole pool on one segfault and `multiprocessing.Pool` can't kill a running task) contains both failures to one disposable worker and makes real cancellation of running jobs possible. Costs accepted: ~200–400MB extra RSS, one dependency, a pickle boundary (results are strings — trivial). Workers never touch SQLite; the parent owns all job state, so no multi-writer concern (the local admin CLI is the only other writer — WAL absorbs it, see Admin CLI).
 - **How are tokens provisioned?** Resolved: SQLite table + local admin CLI (`bscribe token add/list/delete` via `podman exec`), replacing an earlier static env/file scheme. The CLI wins on: immediate revocation (the server reads the token table per request — env config required a restart), immutable token ids for job ownership (labels can change without orphaning jobs), and secrets hashed at rest (SHA-256 — a copied DB yields no usable credentials). Cost: SQLite moves forward to M1. A token-management HTTP API stays rejected (see Non-goals); the management plane is host-local by design. bscribe provides no at-rest encryption — protecting the filesystem/volume is the operator's responsibility.
+- **`ocr=force` in v1?** Resolved: dropped (2026-07-06, during M1.2). liteparse has no force-OCR — OCR control is a single boolean `ocr_enabled` (verified in the 2.4.0 Python wrapper and the Rust core `config.rs`); `true` already OCRs every page its complexity detection flags, i.e. our `auto`. So v1 exposes `ocr = auto | off`; re-adding `force` if liteparse grows support is an additive, non-breaking change.
+- **`ocr_used` in result metadata?** Resolved: deferred (2026-07-06, during M1.2 review). liteparse's `ParseResult` reports no ocr-used flag. Deriving it from an `is_complex()` pre-check was implemented and then reverted: the pre-check is a fully independent second document pass (double native load; for office/image inputs a second LibreOffice/ImageMagick conversion), it adds a pre-parse failure surface that can reject documents `ocr=off` parses fine (it runs PDFium page-object walks the non-OCR parse path never touches), and it skews `duration_ms` for `ocr=auto` only — all for a verdict that means "needed OCR", not "OCR contributed". liteparse's `parse()` computes the per-page verdict internally and discards it, so the right fix is upstream: expose ocr-applied on `ParseResult`, then adding `ocr_used` back to metadata is additive. Until then results carry no OCR signal and the M3 metrics split by OCR use is deferred with it.
 - **Office formats in v1 or later?** Resolved: v1. Verified in liteparse `conversion.rs` that office support is zero bscribe code — liteparse detects the extension and shells out to LibreOffice headless, with a fresh temp profile per conversion (concurrency-safe) and a 120s timeout. The costs are an ~400MB–1GB bigger image (accepted over maintaining slim/full variants) and LibreOffice joining the untrusted-input threat list. Originally deferred to backlog; pulled forward because the effort turned out to be a Dockerfile line plus docs.
 
 ## Open issues

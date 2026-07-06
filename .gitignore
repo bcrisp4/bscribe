@@ -22,3 +22,6 @@ coverage.xml
 
 # Implementation plans (deliberately not committed)
 docs/superpowers/plans/
+
+# Personal Claude Code notes (machine-specific)
+CLAUDE.local.md
