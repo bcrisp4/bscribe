@@ -9,7 +9,7 @@
 
 ## Objective
 
-bscribe is a self-hosted HTTP service that converts documents (PDFs, images) into plain text or markdown, for consumption by other self-hosted services.
+bscribe is a self-hosted HTTP service that converts documents (PDFs, office documents, images) into plain text or markdown, for consumption by other self-hosted services.
 
 ## Background
 
@@ -39,7 +39,6 @@ Deliberately excluded from v1 but wanted eventually:
 
 - **VLM-based OCR** (surya-ocr-2-class models) for hard documents. Deferred: too many unknowns around model inference today. Consequence: v1 quality ceiling on poor scans is traditional OCR (Tesseract-class). Integration path is already settled — see "Future work: VLM OCR" below.
 - **Web UI** for ad-hoc conversions. Consequence: v1 is usable only via curl/API clients.
-- **Office formats** (DOCX/XLSX/PPTX — liteparse supports these via LibreOffice conversion). Consequence: v1 accepts PDFs and images only.
 
 ## Constraints
 
@@ -60,7 +59,8 @@ Deliberately excluded from v1 but wanted eventually:
 | Job state | SQLite (single file in data volume) | Single user, handful of concurrent jobs; survives restart; no extra container | Schema ports to Postgres if ever outgrown |
 | Job execution | In-process **thread pool** (size 4) inside the FastAPI process. All parsing — sync and async paths alike — runs on this pool; nothing CPU-bound ever runs on the event loop (a blocked loop would fail `/healthz` and get the container killed mid-job). Threads suffice because liteparse's binding releases the GIL around native parse calls (`py.detach()` in `liteparse-python/src/lib.rs` — verified), so parses run truly parallel | No queue infra for one user's load; one bound (4) governs total parse concurrency regardless of endpoint | Splitting out workers later requires a real queue (Redis/arq) — accepted risk, single-user load makes it unlikely |
 | Uploads/results | Uploads to a scratch dir on disk, deleted after processing; results (text/markdown — small) stored in the SQLite job row, TTL-purged | Documents transit, per non-goal | Low |
-| Packaging | Multi-arch container (arm64 + amd64), single image; includes ImageMagick (hard runtime dep for image inputs — liteparse shells out to it for image→PDF conversion) | Matches podman/docker homelab standard | Low |
+| Packaging | Multi-arch container (arm64 + amd64), single image; includes ImageMagick (image→PDF) and LibreOffice (office→PDF) — liteparse shells out to both. LibreOffice adds ~400MB–1GB to the image; accepted, disk is cheap and a slim/full variant matrix isn't | Matches podman/docker homelab standard | Low |
+| Office document support | liteparse's built-in LibreOffice conversion (`soffice --headless --convert-to pdf`, fresh temp `UserInstallation` profile per conversion — concurrency-safe, 120s timeout) | Zero bscribe code; verified in liteparse `conversion.rs`. Accepted formats include doc/docx, xls/xlsx/csv, ppt/pptx, odt/ods/odp, rtf, pages/numbers/key | Drop LibreOffice from the image, formats 422 |
 
 ### Future work: VLM OCR
 
@@ -96,7 +96,7 @@ flowchart LR
         WP["Thread pool (4)<br/>(sync + async parses)"]
         PP["ParserPort"]
         JS["JobStorePort"]
-        LP["liteparse adapter<br/>(PDFium + Tesseract embedded;<br/>shells out to ImageMagick)"]
+        LP["liteparse adapter<br/>(PDFium + Tesseract embedded;<br/>shells out to ImageMagick + LibreOffice)"]
         SQ["SQLite adapter"]
     end
 
@@ -118,7 +118,7 @@ flowchart LR
     LP -.->|"POST /ocr"| OCRS -.-> INF
 ```
 
-PDFium and Tesseract appear by name because they are part of the untrusted-input attack surface (see Security); they arrive embedded in liteparse's Python wheel, never used directly. The third member, ImageMagick (image→PDF conversion), is installed in the container as a system package.
+PDFium and Tesseract appear by name because they are part of the untrusted-input attack surface (see Security); they arrive embedded in liteparse's Python wheel, never used directly. The other two members, ImageMagick (image→PDF) and LibreOffice (office→PDF), are installed in the container as system packages.
 
 ## Interfaces
 
@@ -139,6 +139,8 @@ PDFium and Tesseract appear by name because they are part of the untrusted-input
 The API is path-versioned (`/v1`). Breaking changes require `/v2`; additive changes (new optional params, new response fields) do not bump the version. This is the stability contract bsearch connectors rely on.
 
 Request parameters (both conversion endpoints): `file` (multipart, required), `output` = `markdown` (default) | `text`, `ocr` = `auto` (default, via liteparse complexity detection) | `force` | `off`.
+
+Accepted inputs: PDFs, images (jpg/png/gif/bmp/tiff/webp/svg, via ImageMagick), and office documents (Word/Excel/PowerPoint families incl. OpenDocument, RTF, CSV, Apple iWork — via LibreOffice). Unsupported extensions get a `422`.
 
 A configurable global max upload size (default 500MB) guards disk, not the sync path.
 
@@ -193,6 +195,7 @@ Deliberately loose — one user, retry-friendly callers, zero revenue impact. Th
 | Concurrent jobs | 4 (configurable; matches Pi 5 core count) | Worker pool default 4; SQLite uncontended at this scale |
 | Sync latency (born-digital only) | p95 < 5s for a clean 10-page born-digital PDF on Pi 5. Measured 2026-07-05 on the target Pi 5 (stock arm64 container): ~10ms/page born-digital, ~1.1s/page through bundled Tesseract OCR — ~50× headroom for the target class. Re-measure under the hardened container in M1 | Violation = bug tripwire, not tuning signal; no perf work planned |
 | Sync latency (OCR path) | No target. OCR is ~1.1s/page (Tesseract, measured), so a scanned 10-pager takes ~11s synchronously — permitted (no sync limits, caller owns timeout risk) but the async path is the intended route for scanned documents | Sync stays limit-free; docs/README steer OCR-heavy workloads to `/v1/jobs` |
+| Sync latency (office docs) | No target. Each conversion spawns a fresh LibreOffice process — expect seconds of overhead per document, plus a memory spike (possibly hundreds of MB for large spreadsheets). Unmeasured; measure in M1 | Thread-pool bound (4) also caps concurrent soffice processes, protecting the Pi's shared RAM |
 | Async throughput | No deadline. A job is done when it's done; CPU VLM OCR at ~0.1 pages/s later is acceptable | No queue tuning, no priorities, no job SLAs |
 | Data loss | Losing all queued jobs/results = shrug; callers resubmit | Job persistence is convenience, not a durability promise; no backups of bscribe state |
 
@@ -202,7 +205,7 @@ Exposure: bscribe listens only on the tailnet (`marlin-tet.ts.net`) or LAN behin
 
 Threat scenarios:
 
-- **Malicious/malformed document.** The realistic attack surface: PDFium, Tesseract, and ImageMagick (used by liteparse for image→PDF conversion; the worst CVE history of the three) are C/C++ code fed untrusted bytes. Mitigations: container runs as non-root with a read-only root filesystem and no added capabilities; memory/CPU limits at the container level; documents come only from authenticated callers (me); worst case is contained to a service whose entire state is disposable (see SLOs — data loss = shrug).
+- **Malicious/malformed document.** The realistic attack surface: PDFium, Tesseract, ImageMagick (image→PDF; the worst CVE history of the set), and LibreOffice (office→PDF; headless conversion does not execute macros, but its parsers are another large C++ codebase) are all fed untrusted bytes. Mitigations: container runs as non-root with a read-only root filesystem and no added capabilities; memory/CPU limits at the container level; documents come only from authenticated callers (me); worst case is contained to a service whose entire state is disposable (see SLOs — data loss = shrug).
 - **Leaked bearer token.** Second factor only — an attacker would also need tailnet access. Tokens are provisioned as static config (env/file), one named token per caller (e.g. `bsearch`, `adhoc`); revoking one caller = remove its token and restart, others unaffected. There is no token-management API — that would creep toward user accounts (see Non-goals). Tokens never appear in logs or error responses; the token *name* may appear in logs to attribute requests.
 - **Compromised tailnet device.** Any tailnet device can reach the API with the token. Accepted: bscribe holds no stored documents to exfiltrate; the blast radius is transient job results.
 - **SSRF via OCR endpoint.** The OCR server URL is operator-set config, not caller-supplied. No caller-controlled outbound requests exist in the API.
@@ -240,7 +243,7 @@ Instrumentation via `prometheus-client` + FastAPI middleware. Alerting stays in 
 
 Ordered by ROI: each demoable, value before scaffolding.
 
-**M1 — sync converter.** `POST /v1/convert` (markdown/text out, `ocr=auto|force|off` via liteparse's built-in Tesseract), bearer token auth, `/healthz`, multi-arch container image. No database. Demo: convert a real bank-statement scan from curl on the tailnet.
+**M1 — sync converter.** `POST /v1/convert` (markdown/text out, `ocr=auto|force|off` via liteparse's built-in Tesseract), all input formats (PDF, images, office docs — container ships ImageMagick + LibreOffice), bearer token auth, `/healthz`, multi-arch container image. No database. Demo: convert a real bank-statement scan and a `.docx` from curl on the tailnet. Measure office-conversion overhead on the Pi (unmeasured — see SLOs).
 
 **M2 — async jobs.** SQLite job store, worker pool (4), all `/v1/jobs` endpoints including list, TTL purge. Demo: submit a 100-page PDF, poll, fetch the result, watch it purge.
 
@@ -248,7 +251,7 @@ Ordered by ROI: each demoable, value before scaffolding.
 
 **M4 — VLM OCR.** Deployment recipe for the surya OCR server (liteparse OCR API spec), config-only swap, backend choice per the inference decision in Open issues. Demo: a garbage scan through Tesseract vs surya, side by side.
 
-Backlog (unordered, from Missing features): web UI, office formats, webhooks if polling ever annoys.
+Backlog (unordered, from Missing features): web UI, webhooks if polling ever annoys.
 
 ## Alternatives considered
 
@@ -265,6 +268,7 @@ Backlog (unordered, from Missing features): web UI, office formats, webhooks if 
 - **How do callers know when to re-ingest?** Resolved: stateless fingerprint contract (`pipeline` metadata + `GET /v1/info`); callers own the tracking.
 - **Does liteparse actually run on Pi 5 / arm64?** Resolved by testing on the target hardware (2026-07-05, `python:3.14-slim` arm64 container on the Pi 5 via podman): PyPI publishes a proper aarch64 manylinux wheel (liteparse 2.4.0, bundled `libpdfium.so`), born-digital parsing works (~10ms/page), `is_complex` works, bundled Tesseract OCR works with zero setup (~1.1s/page), and image input works once ImageMagick is installed in the container (hard external dependency, clear error without it).
 - **Threads or processes for the worker pool?** Resolved: threads. liteparse's Python binding releases the GIL around all parse calls (`py.detach()`, verified in `liteparse-python/src/lib.rs`), so a thread pool gets true parallelism without process-pool complexity (result passing, cancellation).
+- **Office formats in v1 or later?** Resolved: v1. Verified in liteparse `conversion.rs` that office support is zero bscribe code — liteparse detects the extension and shells out to LibreOffice headless, with a fresh temp profile per conversion (concurrency-safe) and a 120s timeout. The costs are an ~400MB–1GB bigger image (accepted over maintaining slim/full variants) and LibreOffice joining the untrusted-input threat list. Originally deferred to backlog; pulled forward because the effort turned out to be a Dockerfile line plus docs.
 
 ## Open issues
 
