@@ -26,7 +26,8 @@ class Settings(BaseSettings):
         worker_count: Parse worker processes; bounds total parse concurrency.
         job_timeout_seconds: Per-job deadline; the worker is SIGKILLed at it.
         max_upload_bytes: Global upload size limit (rejected with 413).
-        scratch_dir: Transient upload storage; wiped on startup.
+        scratch_dir: Transient upload storage (startup wipe arrives with the
+            job store — see design doc "Startup sweep").
         db_path: SQLite database file (tokens now, jobs from M2).
         result_ttl_seconds: How long job results are retained for pickup.
         log_level: Minimum level emitted by the structlog pipeline.

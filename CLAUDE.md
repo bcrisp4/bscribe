@@ -18,7 +18,7 @@ Status: bootstrapping. Only `GET /healthz` exists. Conversion API arrives milest
 
 ## GitHub repo settings
 
-`main` protected: required checks must pass before merge, GitHub auto-merge disabled — wait for green, then `gh pr merge --squash --delete-branch`. Conflicted dependabot PR → comment `@dependabot rebase` (still supported; merge/close comment commands deprecated 2026-01).
+`main` protected: required checks must pass before merge, GitHub auto-merge disabled. All checks must be green before a PR can merge, but green CI is **not** merge authorization — only merge PRs with explicit, per-PR consent from the user (who also reviews, alongside Copilot). Merge command: `gh pr merge --squash --delete-branch`. Conflicted dependabot PR → comment `@dependabot rebase` (still supported; merge/close comment commands deprecated 2026-01).
 
 ## Commands
 
