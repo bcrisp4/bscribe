@@ -129,7 +129,7 @@ PDFium and Tesseract appear by name because they are part of the untrusted-input
 
 | Method/path | Purpose |
 |---|---|
-| `POST /v1/convert` | Synchronous conversion. Multipart upload; result inline in response. Runs on the same worker pool as async jobs — a sync request waits for a free slot, so total parse concurrency is bounded at 4 even during a connector backfill. No size/page limit — caller owns timeout risk (long conversions through proxies may need async instead). |
+| `POST /v1/convert` | Synchronous conversion. Multipart upload; result inline in response. Runs on the same worker pool as async jobs — a sync request waits for a free slot, so total parse concurrency is bounded at 4 even during a connector backfill. No page limit; uploads bounded only by the global max size. Long conversions run against the per-job timeout (default 10 min → `500`) and any proxy timeouts — OCR-heavy or huge documents belong on the async path. |
 | `POST /v1/jobs` | Asynchronous conversion. Same parameters as `/v1/convert`; returns a job id immediately. |
 | `GET /v1/jobs` | List the calling token's jobs, newest first; `?status=` filter. |
 | `GET /v1/jobs/{id}` | Job status: `queued` \| `running` \| `done` \| `failed`. |
@@ -231,7 +231,7 @@ Deliberately loose — one user, retry-friendly callers, zero revenue impact. Th
 | Callers | 1–3 internal services + occasional curl | Static bearer tokens, one per caller; no rate limiting; no quotas |
 | Concurrent jobs | 4 (configurable; matches Pi 5 core count) | Worker pool default 4; SQLite uncontended at this scale |
 | Sync latency (born-digital only) | p95 < 5s for a clean 10-page born-digital PDF on Pi 5. Measured 2026-07-05 on the target Pi 5 (stock arm64 container): ~10ms/page born-digital, ~1.1s/page through bundled Tesseract OCR — ~50× headroom for the target class. Re-measure under the hardened container in M1 | Violation = bug tripwire, not tuning signal; no perf work planned |
-| Sync latency (OCR path) | No target. OCR is ~1.1s/page (Tesseract, measured), so a scanned 10-pager takes ~11s synchronously — permitted (no sync limits, caller owns timeout risk) but the async path is the intended route for scanned documents | Sync stays limit-free; docs/README steer OCR-heavy workloads to `/v1/jobs` |
+| Sync latency (OCR path) | No target. OCR is ~1.1s/page (Tesseract, measured), so a scanned 10-pager takes ~11s synchronously — permitted (well inside the per-job timeout; caller owns HTTP/proxy timeout risk) but the async path is the intended route for scanned documents | Sync stays limit-free; docs/README steer OCR-heavy workloads to `/v1/jobs` |
 | Sync latency (office docs) | No target. Each conversion spawns a fresh LibreOffice process — expect seconds of overhead per document, plus a memory spike (possibly hundreds of MB for large spreadsheets). Unmeasured; measure in M1 | Worker-pool bound (default 4) also caps concurrent soffice processes, protecting the Pi's shared RAM |
 | Async throughput | No deadline. A job is done when it's done; CPU VLM OCR at ~0.1 pages/s later is acceptable | No queue tuning, no priorities, no job SLAs |
 | Data loss | Losing all queued jobs/results = shrug; callers resubmit | Job persistence is convenience, not a durability promise; no backups of bscribe state |
