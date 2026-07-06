@@ -23,6 +23,11 @@ section is renamed to the new version and becomes the GitHub Release notes.
 - Error responses now use RFC 9457 `application/problem+json`; malformed
   requests return `400`, and unexpected failures return `500` without leaking
   internal details.
+- Document parsing core (groundwork for the M1 conversion API): the liteparse
+  engine converts PDFs to markdown or plain text, with OCR applied
+  automatically to pages that need it (`auto`) or disabled (`off`). A planned
+  `force` mode was dropped — liteparse exposes no way to force OCR on every
+  page; `auto` already covers every page its complexity detection flags.
 
 ### Fixed
 
