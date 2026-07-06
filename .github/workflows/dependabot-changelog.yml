@@ -1,0 +1,45 @@
+# Adds a `### Dependencies` entry under [Unreleased] in CHANGELOG.md on
+# Dependabot PRs that carry the `dependencies` label (uv ecosystem — runtime
+# and build deps). github-actions ecosystem PRs are labelled `skip-changelog`
+# instead (see dependabot.yml) and never activate the helper.
+#
+# The commit is pushed with CHANGELOG_PAT (fine-grained PAT, contents r/w,
+# stored as both an Actions and a Dependabot secret) rather than GITHUB_TOKEN:
+# GITHUB_TOKEN pushes don't trigger workflows, which would leave the new head
+# SHA with no check runs and the PR unmergeable behind required checks.
+#
+# "[dependabot skip]" in the commit message lets Dependabot force-push rebases
+# over the changelog commit; this workflow then re-runs on `synchronize` and
+# re-adds the entry. Pushes by the PAT owner don't loop: the actor guard only
+# matches dependabot[bot].
+name: dependabot-changelog
+
+on:
+  pull_request:
+    # labeled: manually applying `dependencies` should trigger the helper.
+    types: [opened, synchronize, reopened, labeled]
+
+permissions: {}
+
+jobs:
+  changelog:
+    name: dependabot-changelog
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          # PAT (not GITHUB_TOKEN) so the auto-commit push re-triggers CI.
+          token: ${{ secrets.CHANGELOG_PAT }}
+
+      - uses: dangoslen/dependabot-changelog-helper@291c8cb629d7cd7b57ea065782c435ec2bedb138 # v4.3.0
+        with:
+          activationLabels: dependencies
+          changelogPath: ./CHANGELOG.md
+
+      - uses: stefanzweifel/git-auto-commit-action@4a55954c782fc1ea30b9056cd3e7a2b40ca8887d # v7.2.0
+        with:
+          commit_message: "docs: changelog entry for dependency bump [dependabot skip]"

@@ -26,16 +26,40 @@ Use the Keep a Changelog categories, in this order:
 | `Removed`    | removed features                 |
 | `Fixed`      | bug fixes                        |
 | `Security`   | vulnerabilities fixed            |
+| `Dependencies` | runtime/build dependency bumps |
 
 Only include the categories you actually need. Keep entries terse and in the
-present tense.
+present tense. (`Dependencies` is a bscribe extension to the standard Keep a
+Changelog categories; its entries are written by automation, see below.)
 
 ## When you may skip an entry
 
 Some PRs genuinely have no user-facing change: CI/tooling tweaks, internal
-refactors with no behaviour change, test-only changes, dependency bumps,
-documentation. For those, apply the **`skip-changelog`** label to the PR and
-the enforcing job is skipped. Prefer adding an entry when in doubt.
+refactors with no behaviour change, test-only changes, documentation. For
+those, apply the **`skip-changelog`** label to the PR and the enforcing job is
+skipped. Prefer adding an entry when in doubt.
+
+## Dependency bumps (automated)
+
+Dependabot PRs are handled without manual changelog work:
+
+- **Runtime/build deps** (uv ecosystem, `deps:` commit prefix): the
+  [`dependabot-changelog`](../.github/workflows/dependabot-changelog.yml)
+  workflow adds a `### Dependencies` entry under `[Unreleased]` and commits it
+  to the PR branch. The push uses the `CHANGELOG_PAT` secret so required
+  checks re-run, and the commit message carries `[dependabot skip]` so
+  Dependabot can still rebase the branch (the workflow re-adds the entry
+  afterwards).
+- **GitHub Actions bumps** (`ci:` commit prefix): labelled `skip-changelog`
+  automatically via `labels:` in
+  [`dependabot.yml`](../.github/dependabot.yml) — they don't change the
+  shipped artifact, so they get no changelog entry.
+
+One-time setup behind this (outside the codebase): a fine-grained PAT with
+Contents read/write on this repo, stored as **both** an Actions secret and a
+Dependabot secret named `CHANGELOG_PAT`. Dependabot-triggered workflow runs
+read from the Dependabot secret store, not the Actions one. When the PAT
+expires, both copies must be rotated.
 
 ## How CI enforces it
 

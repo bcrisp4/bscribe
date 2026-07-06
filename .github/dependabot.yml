@@ -7,6 +7,11 @@ updates:
       interval: weekly
     commit-message:
       prefix: ci
+    # Replaces the default `dependencies` label: action bumps don't change the
+    # shipped artifact, so they skip the changelog (and must not activate the
+    # dependabot-changelog workflow, which keys on `dependencies`).
+    labels:
+      - skip-changelog
 
   # Python dependencies via uv.lock.
   - package-ecosystem: uv
