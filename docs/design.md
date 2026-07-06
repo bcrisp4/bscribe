@@ -28,7 +28,7 @@ There's also a privacy motivation: online converter sites are the easy alternati
 
 ## Non-goals
 
-- **No user accounts.** Single human user. No accounts, no tenants, no per-user quotas, no token-management API. Auth is a small set of static bearer tokens, one per caller, each independently revocable. Tokens are principals — each sees only its own jobs (see Security) — but that is caller isolation, not user identity: no profiles, no roles, no admin scopes.
+- **No user accounts.** Single human user. No accounts, no tenants, no per-user quotas, no token-management API — tokens are managed by a local admin CLI (host exec), never over HTTP. Auth is a small set of long-lived bearer tokens, one per caller, each independently revocable. Tokens are principals — each sees only its own jobs (see Security) — but that is caller isolation, not user identity: no profiles, no roles, no admin scopes.
 - **No document storage.** bscribe is not a document store or DMS. Documents transit the service; results are retained briefly for async pickup only. Downstream services own their own storage.
 - **No semantic layer.** No embeddings, chunking, summarization, or entity extraction. Text/markdown out; downstream services own meaning.
 - **No hosted or commercial offering.** Open source on GitHub, but no hosted option and no commercial ambitions. Others self-host at their own risk.
@@ -56,7 +56,8 @@ Deliberately excluded from v1 but wanted eventually:
 | Parsing engine | liteparse (Python bindings) | Rust core fast on modest hardware; markdown/text output; complexity detection; pluggable OCR | Adapter behind `ParserPort`; replaceable (docling, pypdfium) without touching domain or API |
 | OCR (v1) | liteparse built-in Tesseract | Zero extra infra, bundled, good enough for clean scans | Config change — see next row |
 | OCR (later) | Any HTTP server implementing the liteparse OCR API spec (surya-ocr-2 server) | The spec is the stable boundary: image in, text+bboxes out. bscribe code unchanged when VLM arrives | Config (endpoint URL). The OCR/inference service itself is a separate deployment |
-| Job state | SQLite (single file in data volume) | Single user, handful of concurrent jobs; survives restart; no extra container | Schema ports to Postgres if ever outgrown |
+| Job + token state | SQLite (single file in data volume, WAL mode — server plus occasional local-CLI writer) | Single user, handful of concurrent jobs; survives restart; no extra container | Schema ports to Postgres if ever outgrown |
+| Admin CLI | `bscribe` entrypoint built with typer (`serve`, `healthcheck`, `token add/list/delete`) | Same ecosystem as FastAPI (click-based, typed), free `--help`; keeps token management off the network | Trivial — thin layer over domain calls |
 | Job execution | Warm **process pool** (default 4 recycled workers, configurable; pebble-style: per-job timeout SIGKILL, per-job crash containment, recycle-after-N-jobs) inside the container. FastAPI parent owns HTTP and all job state; workers only parse — file path in, text out over a pipe, no SQLite access. All parsing — sync and async paths alike — runs on this pool; nothing CPU-bound ever runs on the event loop | A hung or segfaulting native parse (untrusted bytes in PDFium/Tesseract/LibreOffice) kills one disposable worker, not the service, and enables real cancellation of running jobs; recycling bounds native-lib leaks. Threads were the original choice — see Closed issues for the reversal. Cost: ~200–400MB extra RSS for 4 warm workers (forkserver + preload shares some), one dep; dispatch overhead ~ms, so the ~10ms/page sync path survives | No queue infra for one user's load; one bound (4) governs total parse concurrency regardless of endpoint. Splitting workers onto other machines still requires a real queue (Redis/arq) — accepted risk |
 | Uploads/results | Uploads to a scratch dir on disk, deleted after processing; results (text/markdown — small) stored in the SQLite job row, TTL-purged | Documents transit, per non-goal | Low |
 | Packaging | Multi-arch container (arm64 + amd64), single image; includes ImageMagick (image→PDF) and LibreOffice (office→PDF) — liteparse shells out to both. LibreOffice adds ~400MB–1GB to the image; accepted, disk is cheap and a slim/full variant matrix isn't | Matches podman/docker homelab standard | Low |
@@ -98,6 +99,7 @@ flowchart LR
         JS["JobStorePort"]
         LP["liteparse adapter<br/>(PDFium + Tesseract embedded;<br/>shells out to ImageMagick + LibreOffice)"]
         SQ["SQLite adapter"]
+        CLI["bscribe CLI<br/>(local admin via exec)"]
     end
 
     SCRATCH[("scratch dir<br/>(transient uploads)")]
@@ -112,6 +114,7 @@ flowchart LR
     BS & CURL -->|"Bearer token"| API
     API --> CORE --> WP
     CORE --> JS --> SQ --> DB
+    CLI --> SQ
     WP --> PP --> LP
     LP --> SCRATCH
     PROM -->|"scrape /metrics"| API
@@ -202,6 +205,22 @@ Status code usage (audited against RFC 9110; the pattern for async polling follo
 
 bscribe stays stateless — it never remembers what it parsed. Callers (bsearch) store the result's whole `pipeline` block (fingerprint **and** component versions) alongside each ingested document; on each ingest cycle they compare stored fingerprints against `GET /v1/info` and re-parse when different. The fingerprint is a hash of all output-affecting component versions and config. It is deliberately coarse — an OCR model bump changes it even for born-digital documents. The stored component versions are what make the escape hatch work: they tell the caller *which* component changed, so when only the OCR component differs, documents whose stored `ocr_used` is false can be skipped. The opaque fingerprint alone can't support that. Occasional unnecessary re-parses are accepted at single-user scale.
 
+### Admin CLI
+
+The container image ships a `bscribe` CLI — one entrypoint for both the server and local administration. Token management is deliberately *not* part of the HTTP API (see Non-goals); the admin path is a local exec (`podman exec bscribe bscribe token …`) talking directly to SQLite, so tampering with tokens requires host access, not just network access.
+
+| Command | Purpose |
+|---|---|
+| `bscribe serve` | Run the server (container CMD) |
+| `bscribe healthcheck` | Probe local `/healthz`, exit 0/1 — used by the container `HEALTHCHECK`, avoids shipping curl |
+| `bscribe token add <label>` | Create a token: generates the secret, prints id + secret **once**. Secrets are never user-chosen |
+| `bscribe token list` | ids, labels, created timestamps — never secrets |
+| `bscribe token delete <id>` | Revoke, effective immediately — the server checks the token table per request, no restart |
+
+Token model: `(id, label, secret_hash, created_at)`. `id` is short, opaque, immutable; jobs stamp `token_id`, so relabeling never orphans jobs. Secrets are stored as SHA-256 hashes — lookup hashes the presented bearer token — so a copied database yields no usable credentials. A lost secret is unrecoverable: rotate by `delete` + `add`. A deleted token's jobs become unreachable (there is no admin read path over jobs) and age out via the normal TTL purge.
+
+The CLI writing SQLite while the server runs is the one genuine multi-process access pattern; WAL mode + `busy_timeout` absorb it.
+
 ## SLOs
 
 Deliberately loose — one user, retry-friendly callers, zero revenue impact. These numbers exist to kill over-engineering, not to aspire to.
@@ -224,9 +243,11 @@ Exposure: bscribe listens only on the tailnet (`marlin-tet.ts.net`) or LAN behin
 Threat scenarios:
 
 - **Malicious/malformed document.** The realistic attack surface: PDFium, Tesseract, ImageMagick (image→PDF; the worst CVE history of the set), and LibreOffice (office→PDF; headless conversion does not execute macros, but its parsers are another large C++ codebase) are all fed untrusted bytes. Mitigations: every parse runs in a disposable, recycled worker process — a crash or hang is contained to that one job and the worker is respawned (see Architecture); container runs as non-root with a read-only root filesystem and no added capabilities; memory/CPU limits at the container level; documents come only from authenticated callers (me); worst case is contained to a service whose entire state is disposable (see SLOs — data loss = shrug). ImageMagick additionally runs under a restrictive `policy.xml` baked into the image: SVG is an accepted input, and ImageMagick's SVG/MVG/MSL handling can trigger outbound fetches and local file reads (the ImageTragick class) — container hardening does not stop outbound requests on the tailnet, so the policy must disable remote-fetch coders and script-like formats. The exact policy (which coders/delegates to disable without breaking legitimate image→PDF conversion) is implementation-time research, tracked in M1.
-- **Leaked bearer token.** Second factor only — an attacker would also need tailnet access. Tokens are provisioned as static config (env/file), one named token per caller (e.g. `bsearch`, `adhoc`); revoking one caller = remove its token and restart, others unaffected. Tokens are principals: each token can see and delete only the jobs it created, so a leaked token exposes only that caller's transient jobs and results, not everything in the store. A revoked token's jobs sit orphaned until the TTL purge. There is no token-management API — that would creep toward user accounts (see Non-goals). Tokens never appear in logs or error responses; the token *name* may appear in logs to attribute requests.
+- **Leaked bearer token.** Second factor only — an attacker would also need tailnet access. Tokens are provisioned via the local admin CLI (see Interfaces), one per caller (e.g. `bsearch`, `adhoc`), stored in SQLite as SHA-256 hashes; revoking one caller = `token delete <id>`, effective immediately, others unaffected. Tokens are principals: each token can see and delete only the jobs it created, so a leaked token exposes only that caller's transient jobs and results, not everything in the store. A revoked token's jobs sit orphaned until the TTL purge. There is no token-management API — that would creep toward user accounts (see Non-goals). Tokens never appear in logs or error responses; the token *label* may appear in logs to attribute requests.
 - **Compromised tailnet device.** Any tailnet device can reach the API with a token. Accepted: bscribe holds no stored documents to exfiltrate; the blast radius is that token's transient job results.
 - **SSRF via OCR endpoint.** The OCR server URL is operator-set config, not caller-supplied. No caller-controlled outbound requests exist in the API.
+
+bscribe provides no at-rest encryption. The SQLite file holds job results (extracted document text) and token hashes; protecting the filesystem/volume — disk encryption, host access control — is the operator's responsibility.
 
 Not addressed (deliberately): rate limiting, audit logging, multi-user isolation — see Non-goals.
 
@@ -262,7 +283,7 @@ Instrumentation via `prometheus-client` + FastAPI middleware. Alerting stays in 
 
 Ordered by ROI: each demoable, value before scaffolding.
 
-**M1 — sync converter.** `POST /v1/convert` (markdown/text out, `ocr=auto|force|off` via liteparse's built-in Tesseract), all input formats (PDF, images, office docs — container ships ImageMagick + LibreOffice), bearer token auth, `/healthz`, multi-arch container image, restrictive ImageMagick `policy.xml` (exact coder policy researched here — see Security), worker process pool (default 4, configurable) with per-job timeout. No database. Demo: convert a real bank-statement scan and a `.docx` from curl on the tailnet. Measure office-conversion overhead on the Pi (unmeasured — see SLOs).
+**M1 — sync converter.** `POST /v1/convert` (markdown/text out, `ocr=auto|force|off` via liteparse's built-in Tesseract), all input formats (PDF, images, office docs — container ships ImageMagick + LibreOffice), bearer token auth backed by the SQLite token table, the `bscribe` CLI (`serve`, `healthcheck`, `token add/list/delete`), `/healthz`, multi-arch container image, restrictive ImageMagick `policy.xml` (exact coder policy researched here — see Security), worker process pool (default 4, configurable) with per-job timeout. No job store yet — SQLite carries only tokens in M1. Demo: convert a real bank-statement scan and a `.docx` from curl on the tailnet. Measure office-conversion overhead on the Pi (unmeasured — see SLOs).
 
 **M2 — async jobs.** SQLite job store, all `/v1/jobs` endpoints including list and cancellation of running jobs, TTL purge. Demo: submit a 100-page PDF, poll, fetch the result, watch it purge.
 
@@ -286,7 +307,8 @@ Backlog (unordered, from Missing features): web UI, webhooks if polling ever ann
 - **Job queue infrastructure?** Resolved: none. SQLite + in-process workers; the SLOs (4 concurrent jobs, best-effort durability) don't justify Redis.
 - **How do callers know when to re-ingest?** Resolved: stateless fingerprint contract (`pipeline` metadata + `GET /v1/info`); callers own the tracking.
 - **Does liteparse actually run on Pi 5 / arm64?** Resolved by testing on the target hardware (2026-07-05, `python:3.14-slim` arm64 container on the Pi 5 via podman): PyPI publishes a proper aarch64 manylinux wheel (liteparse 2.4.0, bundled `libpdfium.so`), born-digital parsing works (~10ms/page), `is_complex` works, bundled Tesseract OCR works with zero setup (~1.1s/page), and image input works once ImageMagick is installed in the container (hard external dependency, clear error without it).
-- **Threads or processes for the worker pool?** Resolved: **processes** — reversing an earlier threads decision. Threads were first chosen because liteparse's binding releases the GIL around parse calls (`py.detach()`, verified in `liteparse-python/src/lib.rs`), so thread parallelism is real and plumbing is zero. Reopened on failure-mode analysis: a thread wedged in a pathological native parse cannot be killed (the pool slot is lost until a container restart, with `/healthz` green throughout), and a segfault in PDFium/Tesseract/LibreOffice kills the API plus every in-flight job — and a caller auto-retrying a poison document turns that into a crash loop needing a human. A warm process pool (per-job timeout SIGKILL, per-job crash containment, worker recycling — pebble-style; stdlib pools rejected because `ProcessPoolExecutor` breaks the whole pool on one segfault and `multiprocessing.Pool` can't kill a running task) contains both failures to one disposable worker and makes real cancellation of running jobs possible. Costs accepted: ~200–400MB extra RSS, one dependency, a pickle boundary (results are strings — trivial). Workers never touch SQLite; the parent owns all job state, so no multi-writer concern.
+- **Threads or processes for the worker pool?** Resolved: **processes** — reversing an earlier threads decision. Threads were first chosen because liteparse's binding releases the GIL around parse calls (`py.detach()`, verified in `liteparse-python/src/lib.rs`), so thread parallelism is real and plumbing is zero. Reopened on failure-mode analysis: a thread wedged in a pathological native parse cannot be killed (the pool slot is lost until a container restart, with `/healthz` green throughout), and a segfault in PDFium/Tesseract/LibreOffice kills the API plus every in-flight job — and a caller auto-retrying a poison document turns that into a crash loop needing a human. A warm process pool (per-job timeout SIGKILL, per-job crash containment, worker recycling — pebble-style; stdlib pools rejected because `ProcessPoolExecutor` breaks the whole pool on one segfault and `multiprocessing.Pool` can't kill a running task) contains both failures to one disposable worker and makes real cancellation of running jobs possible. Costs accepted: ~200–400MB extra RSS, one dependency, a pickle boundary (results are strings — trivial). Workers never touch SQLite; the parent owns all job state, so no multi-writer concern (the local admin CLI is the only other writer — WAL absorbs it, see Admin CLI).
+- **How are tokens provisioned?** Resolved: SQLite table + local admin CLI (`bscribe token add/list/delete` via `podman exec`), replacing an earlier static env/file scheme. The CLI wins on: immediate revocation (the server reads the token table per request — env config required a restart), immutable token ids for job ownership (labels can change without orphaning jobs), and secrets hashed at rest (SHA-256 — a copied DB yields no usable credentials). Cost: SQLite moves forward to M1. A token-management HTTP API stays rejected (see Non-goals); the management plane is host-local by design. bscribe provides no at-rest encryption — protecting the filesystem/volume is the operator's responsibility.
 - **Office formats in v1 or later?** Resolved: v1. Verified in liteparse `conversion.rs` that office support is zero bscribe code — liteparse detects the extension and shells out to LibreOffice headless, with a fresh temp profile per conversion (concurrency-safe) and a 120s timeout. The costs are an ~400MB–1GB bigger image (accepted over maintaining slim/full variants) and LibreOffice joining the untrusted-input threat list. Originally deferred to backlog; pulled forward because the effort turned out to be a Dockerfile line plus docs.
 
 ## Open issues
