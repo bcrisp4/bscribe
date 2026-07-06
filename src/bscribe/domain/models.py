@@ -30,15 +30,17 @@ class OcrMode(StrEnum):
 class ParsedDocument:
     """Result of parsing one document: content plus conversion metadata.
 
+    An ``ocr_used`` quality signal is deliberately absent for now: liteparse
+    does not report whether OCR ran, and deriving it cost a duplicate
+    document pass — see docs/design.md, Closed issues. Adding it back when
+    the engine exposes the signal is an additive change.
+
     Attributes:
         content: Extracted text in the requested output format.
         pages: Number of pages in the parsed document.
-        ocr_used: Whether OCR contributed to the content. Derived by the
-            adapter (the engine does not report it) — see docs/design.md.
         duration_ms: Wall-clock parse duration in milliseconds.
     """
 
     content: str
     pages: int
-    ocr_used: bool
     duration_ms: float

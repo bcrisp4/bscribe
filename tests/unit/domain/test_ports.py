@@ -30,9 +30,7 @@ class TestParserPortConformance:
 
     def test_fake_parser_satisfies_port(self) -> None:
         fake = FakeParser(
-            result=ParsedDocument(
-                content="text", pages=1, ocr_used=False, duration_ms=1.0
-            )
+            result=ParsedDocument(content="text", pages=1, duration_ms=1.0)
         )
         assert isinstance(fake, ParserPort)
 

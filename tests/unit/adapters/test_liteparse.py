@@ -38,10 +38,6 @@ class FakeEngine:
         del path
         return self.result
 
-    def is_complex(self, path: str | Path) -> list[object]:
-        del path
-        return []
-
 
 @pytest.fixture
 def fake_engine(monkeypatch: pytest.MonkeyPatch) -> FakeEngine:

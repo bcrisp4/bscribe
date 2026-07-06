@@ -41,7 +41,6 @@ class TestBornDigitalPdf:
         # Markdown structure survives: the fixture renders a heading.
         assert "#" in doc.content
         assert doc.pages == 1
-        assert doc.ocr_used is False
         assert doc.duration_ms > 0
 
     def test_text_output(self, parser: LiteparseParser) -> None:
@@ -55,7 +54,6 @@ class TestBornDigitalPdf:
     def test_ocr_off(self, parser: LiteparseParser) -> None:
         doc = parser.parse(FIXTURE_PDF, output=OutputFormat.MARKDOWN, ocr=OcrMode.OFF)
         assert "Sample PDF" in doc.content
-        assert doc.ocr_used is False
 
 
 class TestFailureModes:

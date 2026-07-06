@@ -6,9 +6,10 @@ verified against liteparse 2.4.0 — see docs/design.md, Closed issues):
 
 - OCR control is a boolean ``ocr_enabled`` (True = OCR pages that need
   it), which maps exactly onto ``OcrMode.AUTO``/``OFF``.
-- ``ParseResult`` reports no ``ocr_used`` flag, so it is derived from the
-  engine's own ``is_complex()`` pre-check — the same per-page
-  ``needs_ocr`` signal liteparse's OCR routing uses internally.
+- ``ParseResult`` reports no ocr-used flag, so ``ParsedDocument`` carries
+  none: deriving it from an ``is_complex()`` pre-check meant a duplicate
+  document pass and a second failure surface (see docs/design.md, Closed
+  issues). Returns if liteparse exposes the signal on parse results.
 - ``liteparse.__version__`` is hardcoded to a stale ``"2.0.0"`` upstream;
   when the pipeline-version metadata lands (M3), read the real version via
   ``importlib.metadata.version("liteparse")``.
@@ -62,9 +63,6 @@ class LiteparseParser:
         start = time.perf_counter()
         engine = self._engine(output, ocr)
         try:
-            ocr_used = ocr is OcrMode.AUTO and any(
-                page.needs_ocr for page in engine.is_complex(path)
-            )
             result = engine.parse(path)
         except liteparse.ParseError as exc:
             # Message deliberately generic: liteparse errors can quote
@@ -77,6 +75,5 @@ class LiteparseParser:
         return ParsedDocument(
             content=result.text,
             pages=len(result.pages),
-            ocr_used=ocr_used,
             duration_ms=(time.perf_counter() - start) * 1000,
         )
