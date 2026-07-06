@@ -65,7 +65,7 @@ Package version from git tags via setuptools-scm — **no version string to bump
 
 ## Changelog (CI-enforced)
 
-Every behavior-changing PR must add entry under `[Unreleased]` in `CHANGELOG.md` (Keep a Changelog format, user's point of view, present tense). CI fails PR otherwise. Genuinely non-user-facing PR → `skip-changelog` label instead. Policy: `docs/changelog.md`.
+Every behavior-changing PR must add entry under `[Unreleased]` in `CHANGELOG.md` (Keep a Changelog format, user's point of view, present tense). CI fails PR otherwise. Non-user-facing PR (docs-only, CI/tooling, refactor, test-only) → MUST apply `skip-changelog` label to the PR (`gh pr edit <n> --add-label skip-changelog`) or the changelog job fails. Policy: `docs/changelog.md`.
 
 ## Testing conventions
 
