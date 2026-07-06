@@ -12,6 +12,10 @@ Designs/specs committed under `docs/`. Implementation plans **never** committed 
 
 Status: bootstrapping. Only `GET /healthz` exists. Conversion API arrives milestone M1 (milestones in design doc).
 
+## Work tracking
+
+**GitHub issues = source of truth for all work tracking.** Milestones M1–M4 mirror the design-doc milestones; every work item is an issue attached to one (`gh issue list --milestone "M1 — sync converter"`). Before starting work, find (or create) the issue; reference it in PRs (`Closes #N`). Don't track work in TODO files, the design doc, or anywhere else — scope/dependency changes get recorded on the issue itself.
+
 ## Commands
 
 All tooling through uv (`uv run …`). Developer tasks = Make targets:
