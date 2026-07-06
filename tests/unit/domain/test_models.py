@@ -25,10 +25,10 @@ class TestOutputFormat:
     """Enum values are the wire strings from the API contract."""
 
     def test_markdown_value(self) -> None:
-        assert OutputFormat.MARKDOWN == "markdown"
+        assert OutputFormat.MARKDOWN.value == "markdown"
 
     def test_text_value(self) -> None:
-        assert OutputFormat.TEXT == "text"
+        assert OutputFormat.TEXT.value == "text"
 
     def test_only_two_formats(self) -> None:
         assert len(OutputFormat) == 2
@@ -38,10 +38,10 @@ class TestOcrMode:
     """Enum values are the wire strings; force is deliberately absent."""
 
     def test_auto_value(self) -> None:
-        assert OcrMode.AUTO == "auto"
+        assert OcrMode.AUTO.value == "auto"
 
     def test_off_value(self) -> None:
-        assert OcrMode.OFF == "off"
+        assert OcrMode.OFF.value == "off"
 
     def test_force_absent(self) -> None:
         # liteparse has no force-OCR; see docs/design.md Closed issues.

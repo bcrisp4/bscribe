@@ -8,6 +8,7 @@ authors = [{ name = "Ben Crisp", email = "ben@thecrisp.io" }]
 dynamic = ["version"]
 dependencies = [
     "fastapi",
+    "liteparse>=2.4.0",
     "pydantic-settings>=2.14.2",
     "structlog>=26.1.0",
     "uvicorn[standard]",
