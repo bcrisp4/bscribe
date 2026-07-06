@@ -1,0 +1,84 @@
+[project]
+name = "bscribe"
+description = "Self-hosted HTTP service converting documents to text/markdown."
+readme = "README.md"
+requires-python = ">=3.14"
+license = "MIT"
+authors = [{ name = "Ben Crisp", email = "ben@thecrisp.io" }]
+dynamic = ["version"]
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+]
+
+[project.urls]
+Homepage = "https://github.com/bcrisp4/bscribe"
+
+[build-system]
+requires = ["setuptools>=77", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools_scm]
+version_file = "src/bscribe/_version.py"
+
+# The container passes the version via SETUPTOOLS_SCM_PRETEND_VERSION_FOR_BSCRIBE.
+# uv caches the built project by file contents, NOT by env vars, so without this
+# a cached wheel would ship a stale version when only the build arg changes.
+# Listing the env var as a cache key makes uv rebuild when the version changes.
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { env = "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_BSCRIBE" },
+]
+
+[dependency-groups]
+dev = [
+    "ruff",
+    "pyright",
+    "mypy",
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+    "pytest-xdist",
+    "httpx",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py314"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W", "I", "UP", "B", "SIM", "TCH", "RUF", "PTH", "ASYNC",
+    "S", "T20", "ARG", "FBT", "A", "C4", "DTZ", "ISC", "PIE", "RSE", "RET", "TID",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "ARG", "FBT"]
+
+[tool.pyright]
+typeCheckingMode = "strict"
+pythonVersion = "3.14"
+venvPath = "."
+venv = ".venv"
+include = ["src", "tests"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+files = ["src", "tests"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-markers"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+parallel = true
+source = ["bscribe"]
+omit = ["*/_version.py"]  # setuptools-scm generated; not worth covering
