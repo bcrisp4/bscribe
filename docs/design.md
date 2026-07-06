@@ -237,7 +237,7 @@ Deliberately loose — one user, retry-friendly callers, zero revenue impact. Th
 | Metric | Target | Consequence for design |
 |---|---|---|
 | Availability | Best effort; unavailable for a day = fine. Callers retry | No HA, no replicas, single container, restart-on-failure is the whole story |
-| Callers | 1–3 internal services + occasional curl | Static bearer tokens, one per caller; no rate limiting; no quotas |
+| Callers | 1–3 internal services + occasional curl | A handful of long-lived bearer tokens, one per caller; no rate limiting; no quotas |
 | Concurrent jobs | 4 (configurable; matches Pi 5 core count) | Worker pool default 4; SQLite uncontended at this scale |
 | Sync latency (born-digital only) | p95 < 5s for a clean 10-page born-digital PDF on Pi 5. Measured 2026-07-05 on the target Pi 5 (stock arm64 container): ~10ms/page born-digital, ~1.1s/page through bundled Tesseract OCR — ~50× headroom for the target class. Re-measure under the hardened container in M1 | Violation = bug tripwire, not tuning signal; no perf work planned |
 | Sync latency (OCR path) | No target. OCR is ~1.1s/page (Tesseract, measured), so a scanned 10-pager takes ~11s synchronously — permitted (well inside the per-job timeout; caller owns HTTP/proxy timeout risk) but the async path is the intended route for scanned documents | Sync stays limit-free; docs/README steer OCR-heavy workloads to `/v1/jobs` |
