@@ -26,6 +26,8 @@ class FakeParser:
 
 
 class TestParserPortConformance:
+    """ParserPort is runtime-checkable: structural isinstance checks work."""
+
     def test_fake_parser_satisfies_port(self) -> None:
         fake = FakeParser(
             result=ParsedDocument(

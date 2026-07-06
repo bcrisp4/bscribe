@@ -33,6 +33,8 @@ def test_satisfies_parser_port(parser: LiteparseParser) -> None:
 
 
 class TestBornDigitalPdf:
+    """The fixture parses without OCR in both output formats."""
+
     def test_markdown_output(self, parser: LiteparseParser) -> None:
         doc = parser.parse(FIXTURE_PDF, output=OutputFormat.MARKDOWN, ocr=OcrMode.AUTO)
         assert "Sample PDF" in doc.content
@@ -57,6 +59,8 @@ class TestBornDigitalPdf:
 
 
 class TestFailureModes:
+    """Engine failures map onto the ParserPort exception contract."""
+
     def test_garbage_bytes_raise_document_unparseable(
         self, parser: LiteparseParser, tmp_path: Path
     ) -> None:
