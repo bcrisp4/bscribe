@@ -130,7 +130,7 @@ PDFium and Tesseract appear by name because they are part of the untrusted-input
 | `POST /v1/jobs` | Asynchronous conversion. Same parameters as `/v1/convert`; returns a job id immediately. |
 | `GET /v1/jobs` | List jobs, newest first; `?status=` filter. |
 | `GET /v1/jobs/{id}` | Job status: `queued` \| `running` \| `done` \| `failed`. |
-| `GET /v1/jobs/{id}/result` | Result when done; `409` while not ready. |
+| `GET /v1/jobs/{id}/result` | Result when done (`200`); `202` while `queued`/`running` (body carries current status); `409` for a terminal job with no result (`failed`). |
 | `DELETE /v1/jobs/{id}` | Cancel a `queued` job / purge a finished one. Returns `409` for `running` jobs — an in-flight native parse can't be interrupted. (Soft-cancel — mark cancelled, discard the result — could be added later without a version bump.) |
 | `GET /v1/info` | Service/pipeline identity: current versions of bscribe, liteparse, OCR engine/model, and the current `pipeline_fingerprint`. Lets callers check "has the pipeline changed?" without submitting a document. |
 | `GET /healthz` | Liveness (no auth). |
@@ -140,13 +140,13 @@ The API is path-versioned (`/v1`). Breaking changes require `/v2`; additive chan
 
 Request parameters (both conversion endpoints): `file` (multipart, required), `output` = `markdown` (default) | `text`, `ocr` = `auto` (default, via liteparse complexity detection) | `force` | `off`.
 
-Accepted inputs: PDFs, images (jpg/png/gif/bmp/tiff/webp/svg, via ImageMagick), and office documents (Word/Excel/PowerPoint families incl. OpenDocument, RTF, CSV, Apple iWork — via LibreOffice). Unsupported extensions get a `422`.
+Accepted inputs: PDFs, images (jpg/png/gif/bmp/tiff/webp/svg, via ImageMagick), and office documents (Word/Excel/PowerPoint families incl. OpenDocument, RTF, CSV, Apple iWork — via LibreOffice). Unsupported formats get a `415`; supported formats that fail to parse get a `422` (sync) or a `failed` job (async).
 
-A configurable global max upload size (default 500MB) guards disk, not the sync path.
+A configurable global max upload size (default 50MB, rejected with `413`) guards disk and doubles as the only memory guard on the office-conversion path (LibreOffice can spike hundreds of MB on large inputs — see SLOs). Deployments that genuinely need bigger documents raise it deliberately.
 
 Job lifecycle details:
 
-- **Startup sweep.** Workers are in-process, so a container restart abandons `running` jobs. On boot, any job found in `running` is marked `failed` with detail `"interrupted by restart — resubmit"`. Re-queueing is not possible: the uploaded document lives in the scratch dir and may not survive the restart. Consistent with the data-loss SLO (callers resubmit).
+- **Startup sweep.** Workers are in-process, so a container restart abandons `running` jobs. On boot, any job found in `running` is marked `failed` with detail `"interrupted by restart — resubmit"`, and the scratch dir is wiped — a restart mid-parse orphans uploaded files there. Re-queueing is not possible: the uploaded document lives in the scratch dir and may not survive the restart. Consistent with the data-loss SLO (callers resubmit).
 - **Caller attribution.** Jobs are stamped with the name of the bearer token that created them (see Security); `GET /v1/jobs` returns it and accepts a `?token=` filter. Attribution and filtering only — all tokens have equal access; this is not isolation.
 
 ### Sample exchange
@@ -180,9 +180,25 @@ Async: `POST /v1/jobs` → `201 {"id": "…", "status": "queued"}`; poll `GET /v
 
 Errors: RFC 9457 `application/problem+json` (`{"type", "title", "status", "detail"}`).
 
+Status code usage (audited against RFC 9110; the pattern for async polling follows the standard request-reply convention — `202` while in progress):
+
+| Code | Used for |
+|---|---|
+| `200` | Sync result, job status, ready result |
+| `201` | Job created (`POST /v1/jobs`) |
+| `202` | Result requested while job still `queued`/`running` |
+| `204` | Job deleted |
+| `400` | Malformed request (bad params, broken multipart) |
+| `401` | Missing/invalid bearer token |
+| `404` | Unknown job id |
+| `409` | State conflict: `DELETE` on a `running` job; result fetch on a `failed` job |
+| `413` | Upload exceeds max size |
+| `415` | Unsupported input format |
+| `422` | Supported format, document unparseable (sync path) |
+
 ### Re-ingestion contract
 
-bscribe stays stateless — it never remembers what it parsed. Callers (bsearch) store the result's `pipeline.fingerprint` alongside each ingested document; on each ingest cycle they compare stored fingerprints against `GET /v1/info` and re-parse when different. The fingerprint is a hash of all output-affecting component versions and config. It is deliberately coarse — an OCR model bump changes it even for born-digital documents; the `ocr_used` flag lets callers skip re-ingesting those. Occasional unnecessary re-parses are accepted at single-user scale.
+bscribe stays stateless — it never remembers what it parsed. Callers (bsearch) store the result's whole `pipeline` block (fingerprint **and** component versions) alongside each ingested document; on each ingest cycle they compare stored fingerprints against `GET /v1/info` and re-parse when different. The fingerprint is a hash of all output-affecting component versions and config. It is deliberately coarse — an OCR model bump changes it even for born-digital documents. The stored component versions are what make the escape hatch work: they tell the caller *which* component changed, so when only the OCR component differs, documents whose stored `ocr_used` is false can be skipped. The opaque fingerprint alone can't support that. Occasional unnecessary re-parses are accepted at single-user scale.
 
 ## SLOs
 
@@ -205,7 +221,7 @@ Exposure: bscribe listens only on the tailnet (`marlin-tet.ts.net`) or LAN behin
 
 Threat scenarios:
 
-- **Malicious/malformed document.** The realistic attack surface: PDFium, Tesseract, ImageMagick (image→PDF; the worst CVE history of the set), and LibreOffice (office→PDF; headless conversion does not execute macros, but its parsers are another large C++ codebase) are all fed untrusted bytes. Mitigations: container runs as non-root with a read-only root filesystem and no added capabilities; memory/CPU limits at the container level; documents come only from authenticated callers (me); worst case is contained to a service whose entire state is disposable (see SLOs — data loss = shrug).
+- **Malicious/malformed document.** The realistic attack surface: PDFium, Tesseract, ImageMagick (image→PDF; the worst CVE history of the set), and LibreOffice (office→PDF; headless conversion does not execute macros, but its parsers are another large C++ codebase) are all fed untrusted bytes. Mitigations: container runs as non-root with a read-only root filesystem and no added capabilities; memory/CPU limits at the container level; documents come only from authenticated callers (me); worst case is contained to a service whose entire state is disposable (see SLOs — data loss = shrug). ImageMagick additionally runs under a restrictive `policy.xml` baked into the image: SVG is an accepted input, and ImageMagick's SVG/MVG/MSL handling can trigger outbound fetches and local file reads (the ImageTragick class) — container hardening does not stop outbound requests on the tailnet, so the policy must disable remote-fetch coders and script-like formats. The exact policy (which coders/delegates to disable without breaking legitimate image→PDF conversion) is implementation-time research, tracked in M1.
 - **Leaked bearer token.** Second factor only — an attacker would also need tailnet access. Tokens are provisioned as static config (env/file), one named token per caller (e.g. `bsearch`, `adhoc`); revoking one caller = remove its token and restart, others unaffected. There is no token-management API — that would creep toward user accounts (see Non-goals). Tokens never appear in logs or error responses; the token *name* may appear in logs to attribute requests.
 - **Compromised tailnet device.** Any tailnet device can reach the API with the token. Accepted: bscribe holds no stored documents to exfiltrate; the blast radius is transient job results.
 - **SSRF via OCR endpoint.** The OCR server URL is operator-set config, not caller-supplied. No caller-controlled outbound requests exist in the API.
@@ -243,7 +259,7 @@ Instrumentation via `prometheus-client` + FastAPI middleware. Alerting stays in 
 
 Ordered by ROI: each demoable, value before scaffolding.
 
-**M1 — sync converter.** `POST /v1/convert` (markdown/text out, `ocr=auto|force|off` via liteparse's built-in Tesseract), all input formats (PDF, images, office docs — container ships ImageMagick + LibreOffice), bearer token auth, `/healthz`, multi-arch container image. No database. Demo: convert a real bank-statement scan and a `.docx` from curl on the tailnet. Measure office-conversion overhead on the Pi (unmeasured — see SLOs).
+**M1 — sync converter.** `POST /v1/convert` (markdown/text out, `ocr=auto|force|off` via liteparse's built-in Tesseract), all input formats (PDF, images, office docs — container ships ImageMagick + LibreOffice), bearer token auth, `/healthz`, multi-arch container image, restrictive ImageMagick `policy.xml` (exact coder policy researched here — see Security). No database. Demo: convert a real bank-statement scan and a `.docx` from curl on the tailnet. Measure office-conversion overhead on the Pi (unmeasured — see SLOs).
 
 **M2 — async jobs.** SQLite job store, worker pool (4), all `/v1/jobs` endpoints including list, TTL purge. Demo: submit a 100-page PDF, poll, fetch the result, watch it purge.
 
