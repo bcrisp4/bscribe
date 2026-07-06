@@ -16,6 +16,10 @@ Status: bootstrapping. Only `GET /healthz` exists. Conversion API arrives milest
 
 **GitHub issues = source of truth for all work tracking.** Milestones M1–M4 mirror the design-doc milestones; every work item is an issue attached to one (`gh issue list --milestone "M1 — sync converter"`). Before starting work, find (or create) the issue; reference it in PRs (`Closes #N`). Don't track work in TODO files, the design doc, or anywhere else — scope/dependency changes get recorded on the issue itself.
 
+## GitHub repo settings
+
+`main` protected: required checks must pass before merge, GitHub auto-merge disabled — wait for green, then `gh pr merge --squash --delete-branch`. Conflicted dependabot PR → comment `@dependabot rebase` (still supported; merge/close comment commands deprecated 2026-01).
+
 ## Commands
 
 All tooling through uv (`uv run …`). Developer tasks = Make targets:
