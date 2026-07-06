@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     Attributes:
         worker_count: Parse worker processes; bounds total parse concurrency.
         job_timeout_seconds: Per-job deadline; the worker is SIGKILLed at it.
+        worker_max_tasks: Jobs a worker runs before being recycled (bounds
+            native-library leaks); 0 disables recycling.
         max_upload_bytes: Global upload size limit (rejected with 413).
         scratch_dir: Transient upload storage (startup wipe arrives with the
             job store — see design doc "Startup sweep").
@@ -37,6 +39,7 @@ class Settings(BaseSettings):
 
     worker_count: int = Field(default=4, ge=1)
     job_timeout_seconds: int = Field(default=600, gt=0)
+    worker_max_tasks: int = Field(default=100, ge=0)
     max_upload_bytes: int = Field(default=50 * 1024 * 1024, gt=0)
     scratch_dir: Path = Field(default_factory=_default_scratch_dir)
     db_path: Path = Path("bscribe.db")

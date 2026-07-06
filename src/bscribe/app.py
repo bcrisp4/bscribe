@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 import structlog
@@ -11,9 +12,10 @@ from fastapi import FastAPI, Request, Response
 from bscribe.errors import register_error_handlers
 from bscribe.log import configure_logging
 from bscribe.settings import Settings
+from bscribe.workers import WorkerPool
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import AsyncGenerator, Awaitable, Callable
 
 logger = structlog.get_logger()
 
@@ -34,7 +36,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     configure_logging(settings.log_level)
 
-    app = FastAPI(title="bscribe")
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
+        """Own the worker pool's lifetime. pebble spawns workers lazily on
+        the first job, so startup stays cheap; shutdown kills any running
+        workers (abandoned jobs are the restart story — see docs/design.md,
+        Startup sweep)."""
+        pool = WorkerPool(
+            worker_count=settings.worker_count,
+            job_timeout_seconds=float(settings.job_timeout_seconds),
+            worker_max_tasks=settings.worker_max_tasks,
+        )
+        app.state.worker_pool = pool
+        try:
+            yield
+        finally:
+            await pool.aclose()
+
+    app = FastAPI(title="bscribe", lifespan=lifespan)
     app.state.settings = settings
     register_error_handlers(app)
 

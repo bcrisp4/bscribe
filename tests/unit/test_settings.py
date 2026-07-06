@@ -20,6 +20,9 @@ class TestDefaults:
     def test_job_timeout_defaults_to_ten_minutes(self) -> None:
         assert Settings().job_timeout_seconds == 600
 
+    def test_worker_max_tasks_defaults_to_one_hundred(self) -> None:
+        assert Settings().worker_max_tasks == 100
+
     def test_max_upload_defaults_to_fifty_megabytes(self) -> None:
         assert Settings().max_upload_bytes == 50 * 1024 * 1024
 
@@ -61,6 +64,19 @@ class TestValidation:
 
     def test_zero_worker_count_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("BSCRIBE_WORKER_COUNT", "0")
+        with pytest.raises(ValidationError):
+            Settings()
+
+    def test_zero_worker_max_tasks_allowed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BSCRIBE_WORKER_MAX_TASKS", "0")
+        assert Settings().worker_max_tasks == 0
+
+    def test_negative_worker_max_tasks_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BSCRIBE_WORKER_MAX_TASKS", "-1")
         with pytest.raises(ValidationError):
             Settings()
 

@@ -7,14 +7,20 @@ domain, not the other way around.
 
 from __future__ import annotations
 
-from bscribe.domain.errors import DocumentUnparseableError
+from bscribe.domain.errors import (
+    DocumentUnparseableError,
+    JobTimeoutError,
+    WorkerCrashedError,
+)
 from bscribe.domain.models import OcrMode, OutputFormat, ParsedDocument
 from bscribe.domain.ports import ParserPort
 
 __all__ = [
     "DocumentUnparseableError",
+    "JobTimeoutError",
     "OcrMode",
     "OutputFormat",
     "ParsedDocument",
     "ParserPort",
+    "WorkerCrashedError",
 ]
