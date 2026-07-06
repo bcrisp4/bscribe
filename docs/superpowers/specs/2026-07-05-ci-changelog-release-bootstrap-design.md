@@ -29,7 +29,7 @@ In scope:
   build-provenance attestation + GitHub Release from the changelog.
 - Keep a Changelog policy (`CHANGELOG.md` + `docs/changelog.md`).
 - Release runbook (`docs/releasing.md`).
-- Dependabot for `github-actions` and `uv` (pip) ecosystems.
+- Dependabot for the `github-actions` and `uv` ecosystems.
 
 Out of scope (deferred to M1+):
 
@@ -83,7 +83,10 @@ docs/releasing.md         # release runbook
 - `[tool.pytest.ini_options]`: `--strict-markers`, `asyncio_mode = "auto"`,
   `testpaths = ["tests"]`.
 - `[tool.coverage.run]`: `branch = true`, `parallel = true`,
-  `source = ["src/bscribe"]`.
+  `source = ["bscribe"]`, `omit = ["*/_version.py"]` (the generated version
+  file would otherwise dilute the coverage figure).
+- `[tool.uv]`: `cache-keys` include the `SETUPTOOLS_SCM_PRETEND_VERSION_FOR_BSCRIBE`
+  env var — see Version source for why.
 
 ### Version source (git tag → setuptools-scm)
 
@@ -106,6 +109,13 @@ ENV SETUPTOOLS_SCM_PRETEND_VERSION_FOR_BSCRIBE=${SETUPTOOLS_SCM_PRETEND_VERSION_
 - `release.yml` passes the real tag version:
   `--build-arg SETUPTOOLS_SCM_PRETEND_VERSION_FOR_BSCRIBE=${version}`.
 
+**uv build-cache caveat.** uv keys its built-project cache on file contents,
+not env vars, so changing only the build arg would otherwise serve a stale
+cached wheel with the wrong version. `[tool.uv] cache-keys` lists the
+pretend-version env var so uv rebuilds when it changes. The Dockerfile also
+uses `uv sync --no-editable` so the version is baked into the installed
+distribution, not a live `.pth` into the source tree.
+
 The git tag stays the single source of truth; no `.git` in the image, no
 committed version string to drift.
 
@@ -126,11 +136,12 @@ guide. Drives the `create_app` factory into existence (TDD).
 Multi-stage, uv-based:
 
 - Builder stage `FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim`;
-  `uv sync --locked --no-dev` into a `.venv`; takes the pretend-version build
-  arg.
-- Runtime stage `FROM python:3.14-slim`; copies the `.venv` and `src`; creates
-  a non-root user; runs as non-root; `ENTRYPOINT` runs uvicorn against
-  `bscribe.app:create_app`.
+  `uv sync --locked --no-dev --no-editable` into a `.venv`; takes the
+  pretend-version build arg.
+- Runtime stage `FROM python:3.14-slim-bookworm` (Debian release matched to the
+  builder so the interpreter/glibc line up); copies only the `.venv` (the
+  `--no-editable` install is self-contained); creates and runs as a non-root
+  user; `ENTRYPOINT` runs uvicorn against `bscribe.app:create_app`.
 - Ships no ImageMagick / LibreOffice / liteparse yet (M1). Read-only-rootfs
   compatible (scratch/tmp are M1 concerns).
 
@@ -149,7 +160,10 @@ Per the style guide: brief description, quick start (`uv sync`,
 
 ## CI — `.github/workflows/ci.yml`
 
-Triggers: `push` to `main`, and all `pull_request`. Top-level
+Triggers: `push` to `main`, and `pull_request` with explicit activity types
+`[opened, synchronize, reopened, labeled, unlabeled]` — the `labeled`/`unlabeled`
+types matter so that applying `skip-changelog` re-evaluates the changelog job
+(the default types would leave a required check stuck failing). Top-level
 `permissions: {}`; each job grants only `contents: read`. Concurrency group
 per workflow+ref, `cancel-in-progress` **only on pull requests** (never cancel
 a `main` run). Single Python **3.14** (no matrix — it's an app pinned to one
@@ -163,8 +177,8 @@ Common setup per job: `actions/checkout` (with `persist-credentials: false`) →
 Jobs:
 
 - **test** — `uv run pytest -n auto` (xdist) with branch coverage; append a
-  coverage table to `$GITHUB_STEP_SUMMARY` via `uv run coverage report
-  --format=markdown` under `if: always()`.
+  fenced `uv run coverage report` to `$GITHUB_STEP_SUMMARY` under
+  `if: always()`.
 - **lint** — `uv run ruff check --output-format=github .` then
   `uv run ruff format --check .` (two steps so failures are distinguishable).
 - **typecheck** — `uv run pyright` then `uv run mypy` (both strict; pyright
@@ -213,16 +227,20 @@ Steps:
 3. `docker/setup-qemu-action` + `docker/setup-buildx-action` (arm64 emulation +
    multi-arch builder).
 4. `docker/login-action` to `ghcr.io` with `GITHUB_TOKEN`.
-5. `docker/metadata-action` → image `ghcr.io/bcrisp4/bscribe`, tags:
-   `type=semver,pattern={{version}}` always; `{{major}}.{{minor}}` and
-   `latest` gated off prereleases.
+5. `docker/metadata-action` → image `ghcr.io/bcrisp4/bscribe`, tags
+   `type=semver,pattern={{version}}` and `type=semver,pattern={{major}}.{{minor}}`.
+   Prerelease gating is native: with the default `latest=auto` flavor, `latest`
+   is applied only to non-prerelease semver tags, and `{{major}}.{{minor}}`
+   falls back to `{{version}}` on a prerelease (no floating tag) — no manual
+   `enable=` guards needed.
 6. `docker/build-push-action` — `platforms: linux/amd64,linux/arm64`,
    `push: true`, `sbom: true`, `provenance: mode=max`,
    `build-args: SETUPTOOLS_SCM_PRETEND_VERSION_FOR_BSCRIBE=<version>`.
 7. `actions/attest-build-provenance` — subject = pushed image digest,
    `push-to-registry: true` (keyless OIDC).
-8. `softprops/action-gh-release` — `body_path` = the extracted notes,
-   `prerelease: auto`.
+8. `softprops/action-gh-release` — `body_path` = the extracted notes;
+   `prerelease` set from whether the tag name contains `-`
+   (action-gh-release has no `auto` value).
 
 Version comes from the tag (see Version source); no `pyproject` bump is needed
 because setuptools-scm reads the tag — but the **changelog roll still happens**
@@ -234,7 +252,9 @@ links) before tagging.
 Ported and Python-ified from bfeed:
 
 - **Versioning**: semver `vMAJOR.MINOR.PATCH`, prereleases `-rc1` etc.;
-  `+build` metadata deliberately unmatched (OCI tags can't contain `+`).
+  `+build` metadata deliberately unmatched (OCI tags can't contain `+`). A
+  prerelease tag needs its own matching `## [X.Y.Z-rcN]` changelog section, or
+  the release job fails fast — the runbook calls this out.
 - **Cutting a release**: on `main`, tree clean, CI green → roll the changelog
   (rename `[Unreleased]`, open fresh, update compare links) → commit (own PR or
   release-prep PR) → `git tag -a vX.Y.Z -m "vX.Y.Z"` → `git push origin vX.Y.Z`.
