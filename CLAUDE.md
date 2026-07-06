@@ -55,6 +55,7 @@ Architectural decisions — expensive-to-reverse ones (language/framework/db, st
 - Present draft to Ben for approval before committing. Ben accepts ADRs, not Claude.
 - Accepted ADR = immutable. Decision changes → new ADR supersedes; update old ADR's status line with link to replacement. Never edit otherwise.
 - Consult `docs/adr/` before proposing anything contradicting accepted ADR — flag conflict, never silently override.
+- No backfill: decisions predating ADR adoption (2026-07-05) live in `docs/design.md` Closed issues. ADRs going forward only.
 
 ## Versioning & releases
 
