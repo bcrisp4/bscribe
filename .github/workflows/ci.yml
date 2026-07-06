@@ -1,0 +1,178 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    # labeled/unlabeled so applying `skip-changelog` re-evaluates the changelog
+    # job; the default types (opened/synchronize/reopened) would not re-trigger,
+    # leaving a required check stuck failing until another commit is pushed.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions: {}
+
+env:
+  UV_MALWARE_CHECK: "1"
+  UV_VERSION: "0.11.26"
+  PYTHON_VERSION: "3.14"
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Sync
+        run: uv sync --locked
+
+      - name: Tests (xdist + branch coverage)
+        run: uv run pytest -n auto --cov=bscribe --cov-branch --cov-report=term-missing
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          {
+            echo '### Coverage'
+            echo '```'
+            uv run coverage report || echo '(no coverage data)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Sync
+        run: uv sync --locked
+
+      - name: ruff check
+        run: uv run ruff check --output-format=github .
+
+      - name: ruff format
+        run: uv run ruff format --check .
+
+  typecheck:
+    name: typecheck
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Sync
+        run: uv sync --locked
+
+      - name: pyright (primary)
+        run: uv run pyright
+
+      - name: mypy (secondary)
+        run: uv run mypy
+
+  audit:
+    name: audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Sync
+        run: uv sync --locked
+
+      - name: uv audit
+        run: uv audit
+
+  image:
+    name: image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      # Smoke test: prove the Dockerfile builds. amd64 only, no push — arm64 is
+      # built at release, and the arm64 liteparse wheel is already verified.
+      - uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          tags: bscribe:ci
+
+  # Enforce a curated CHANGELOG.md entry per PR (see docs/changelog.md).
+  # Skipped on PRs labelled skip-changelog and on pushes to main.
+  changelog:
+    name: changelog
+    if: >-
+      github.event_name == 'pull_request' &&
+      !contains(github.event.pull_request.labels.*.name, 'skip-changelog')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require a CHANGELOG.md entry
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          # Pure-bash membership test — no pipe into grep -q, which under
+          # pipefail can SIGPIPE the writer on a very large file list and
+          # falsely reject a PR that did update the changelog.
+          changed="$(git diff --name-only "origin/${BASE_REF}...HEAD")"
+          if [[ $'\n'"${changed}"$'\n' == *$'\n'CHANGELOG.md$'\n'* ]]; then
+            echo "CHANGELOG.md updated."
+          else
+            echo "::error::No CHANGELOG.md change found. Add an entry under [Unreleased] (see docs/changelog.md), or apply the skip-changelog label."
+            exit 1
+          fi

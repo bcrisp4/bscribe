@@ -1,0 +1,17 @@
+version: 2
+updates:
+  # Keep pinned action SHAs (and their # vX.Y.Z comments) current.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+
+  # Python dependencies via uv.lock.
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps
