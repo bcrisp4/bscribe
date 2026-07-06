@@ -12,6 +12,7 @@ from httpx import ASGITransport
 
 from bscribe.app import create_app
 from bscribe.settings import Settings
+from bscribe.workers import WorkerPool
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -93,3 +94,13 @@ async def test_access_log_excludes_query_string(
         await client.get("/healthz", params={"filename": "medical-letter.pdf"})
 
     assert "medical-letter" not in capsys.readouterr().out
+
+
+async def test_lifespan_creates_and_closes_worker_pool() -> None:
+    """Startup builds the pool from settings; shutdown closes it."""
+    app = create_app(Settings())
+    async with app.router.lifespan_context(app):
+        pool = app.state.worker_pool
+        assert isinstance(pool, WorkerPool)
+    # close() is idempotent, so closing again after shutdown must not raise.
+    pool.close()

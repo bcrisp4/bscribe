@@ -23,6 +23,11 @@ section is renamed to the new version and becomes the GitHub Release notes.
 - Error responses now use RFC 9457 `application/problem+json`; malformed
   requests return `400`, and unexpected failures return `500` without leaking
   internal details.
+- All document parsing now runs on a warm pool of worker processes (default 4,
+  `BSCRIBE_WORKER_COUNT`): each job is killed at a hard deadline
+  (`BSCRIBE_JOB_TIMEOUT_SECONDS`, default 10 minutes), a crashing parse takes
+  down only its own disposable worker, and workers are recycled after
+  `BSCRIBE_WORKER_MAX_TASKS` jobs (default 100) to bound native-library leaks.
 
 ### Fixed
 
