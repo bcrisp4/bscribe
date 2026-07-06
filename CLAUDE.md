@@ -47,6 +47,15 @@ Planned shape (per design doc; most lands M1–M3):
 - **API contract.** Path-versioned (`/v1`). Breaking change requires `/v2`. Errors = RFC 9457 `application/problem+json`. Status-code table in design doc = contract.
 - **Privacy hard rule.** Document content + extracted text never logged, any level. Filenames only at DEBUG. Logging = structlog JSON, data as keyword arguments, never f-strings.
 
+## ADRs
+
+Architectural decisions — expensive-to-reverse ones (language/framework/db, storage/schema, API contracts, auth approach, external deps, cross-cutting conventions) — get an ADR in `docs/adr/`, numbered `NNNN-slug.md`. Format: `docs/adr/0000-template.md`. Cheap-to-swap choices get none.
+
+- Draft ADR at decision time, same session, while alternatives + reasoning still in context.
+- Present draft to Ben for approval before committing. Ben accepts ADRs, not Claude.
+- Accepted ADR = immutable. Decision changes → new ADR supersedes; update old ADR's status line with link to replacement. Never edit otherwise.
+- Consult `docs/adr/` before proposing anything contradicting accepted ADR — flag conflict, never silently override.
+
 ## Versioning & releases
 
 Package version from git tags via setuptools-scm — **no version string to bump** in `pyproject.toml`. Release = push semver tag (`v0.2.0`). Full procedure incl. changelog roll: `docs/releasing.md`.
