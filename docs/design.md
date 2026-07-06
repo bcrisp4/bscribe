@@ -57,7 +57,7 @@ Deliberately excluded from v1 but wanted eventually:
 | OCR (v1) | liteparse built-in Tesseract | Zero extra infra, bundled, good enough for clean scans | Config change — see next row |
 | OCR (later) | Any HTTP server implementing the liteparse OCR API spec (surya-ocr-2 server) | The spec is the stable boundary: image in, text+bboxes out. bscribe code unchanged when VLM arrives | Config (endpoint URL). The OCR/inference service itself is a separate deployment |
 | Job state | SQLite (single file in data volume) | Single user, handful of concurrent jobs; survives restart; no extra container | Schema ports to Postgres if ever outgrown |
-| Job execution | In-process **thread pool** (size 4) inside the FastAPI process. All parsing — sync and async paths alike — runs on this pool; nothing CPU-bound ever runs on the event loop (a blocked loop would fail `/healthz` and get the container killed mid-job). Threads suffice because liteparse's binding releases the GIL around native parse calls (`py.detach()` in `liteparse-python/src/lib.rs` — verified), so parses run truly parallel | No queue infra for one user's load; one bound (4) governs total parse concurrency regardless of endpoint | Splitting out workers later requires a real queue (Redis/arq) — accepted risk, single-user load makes it unlikely |
+| Job execution | Warm **process pool** (default 4 recycled workers, configurable; pebble-style: per-job timeout SIGKILL, per-job crash containment, recycle-after-N-jobs) inside the container. FastAPI parent owns HTTP and all job state; workers only parse — file path in, text out over a pipe, no SQLite access. All parsing — sync and async paths alike — runs on this pool; nothing CPU-bound ever runs on the event loop | A hung or segfaulting native parse (untrusted bytes in PDFium/Tesseract/LibreOffice) kills one disposable worker, not the service, and enables real cancellation of running jobs; recycling bounds native-lib leaks. Threads were the original choice — see Closed issues for the reversal. Cost: ~200–400MB extra RSS for 4 warm workers (forkserver + preload shares some), one dep; dispatch overhead ~ms, so the ~10ms/page sync path survives | No queue infra for one user's load; one bound (4) governs total parse concurrency regardless of endpoint. Splitting workers onto other machines still requires a real queue (Redis/arq) — accepted risk |
 | Uploads/results | Uploads to a scratch dir on disk, deleted after processing; results (text/markdown — small) stored in the SQLite job row, TTL-purged | Documents transit, per non-goal | Low |
 | Packaging | Multi-arch container (arm64 + amd64), single image; includes ImageMagick (image→PDF) and LibreOffice (office→PDF) — liteparse shells out to both. LibreOffice adds ~400MB–1GB to the image; accepted, disk is cheap and a slim/full variant matrix isn't | Matches podman/docker homelab standard | Low |
 | Office document support | liteparse's built-in LibreOffice conversion (`soffice --headless --convert-to pdf`, fresh temp `UserInstallation` profile per conversion — concurrency-safe, 120s timeout) | Zero bscribe code; verified in liteparse `conversion.rs`. Accepted formats include doc/docx, xls/xlsx/csv, ppt/pptx, odt/ods/odp, rtf, pages/numbers/key | Drop LibreOffice from the image, formats 422 |
@@ -93,7 +93,7 @@ flowchart LR
     subgraph bscribe["bscribe container"]
         API["FastAPI /v1 API"]
         CORE["Domain core<br/>(jobs, routing)"]
-        WP["Thread pool (4)<br/>(sync + async parses)"]
+        WP["Worker process pool<br/>(default 4, configurable)<br/>(sync + async parses;<br/>timeout kill + crash containment)"]
         PP["ParserPort"]
         JS["JobStorePort"]
         LP["liteparse adapter<br/>(PDFium + Tesseract embedded;<br/>shells out to ImageMagick + LibreOffice)"]
@@ -131,7 +131,7 @@ PDFium and Tesseract appear by name because they are part of the untrusted-input
 | `GET /v1/jobs` | List the calling token's jobs, newest first; `?status=` filter. |
 | `GET /v1/jobs/{id}` | Job status: `queued` \| `running` \| `done` \| `failed`. |
 | `GET /v1/jobs/{id}/result` | Result when done (`200`); `202` while `queued`/`running` (body carries current status); `409` for a terminal job with no result (`failed`). |
-| `DELETE /v1/jobs/{id}` | Cancel a `queued` job / purge a finished one. Returns `409` for `running` jobs — an in-flight native parse can't be interrupted. (Soft-cancel — mark cancelled, discard the result — could be added later without a version bump.) |
+| `DELETE /v1/jobs/{id}` | Cancel and purge a job in any state, always `204`. For `running` jobs the worker process is killed — real cancellation, a direct benefit of the process-pool execution model. |
 | `GET /v1/info` | Service/pipeline identity: current versions of bscribe, liteparse, OCR engine/model, and the current `pipeline_fingerprint`. Lets callers check "has the pipeline changed?" without submitting a document. |
 | `GET /healthz` | Liveness (no auth). |
 | `GET /metrics` | Prometheus metrics (no auth, tailnet-internal). |
@@ -146,6 +146,7 @@ A configurable global max upload size (default 50MB, rejected with `413`) guards
 
 Job lifecycle details:
 
+- **Job timeout.** Configurable per-job deadline (default 10 min). At the deadline the worker process is SIGKILLed and the job marked `failed` with detail `"timeout"`; a sync request hitting the deadline gets a `500` problem response. No pool slot is ever permanently lost — the pool respawns the worker.
 - **Startup sweep.** Workers are in-process, so a container restart abandons `running` jobs. On boot, any job found in `running` is marked `failed` with detail `"interrupted by restart — resubmit"`, and the scratch dir is wiped — a restart mid-parse orphans uploaded files there. Re-queueing is not possible: the uploaded document lives in the scratch dir and may not survive the restart. Consistent with the data-loss SLO (callers resubmit).
 - **Ownership.** Jobs are owned by the bearer token that created them, and every job endpoint is token-scoped: `GET /v1/jobs` lists only the caller's jobs; `GET`/`DELETE` on another token's job returns `404`, indistinguishable from a nonexistent id, so job existence never leaks across tokens. There is no admin or list-all scope — the operator's debug path is querying SQLite directly on the host. The sync endpoint is unaffected (nothing stored to protect).
 
@@ -191,10 +192,11 @@ Status code usage (audited against RFC 9110; the pattern for async polling follo
 | `400` | Malformed request (bad params, broken multipart) |
 | `401` | Missing/invalid bearer token |
 | `404` | Unknown job id, or a job owned by a different token (indistinguishable by design) |
-| `409` | State conflict: `DELETE` on a `running` job; result fetch on a `failed` job |
+| `409` | Result fetch on a `failed` job |
 | `413` | Upload exceeds max size |
 | `415` | Unsupported input format |
 | `422` | Supported format, document unparseable (sync path) |
+| `500` | Worker crash or job timeout on the sync path; other unexpected failures |
 
 ### Re-ingestion contract
 
@@ -211,7 +213,7 @@ Deliberately loose — one user, retry-friendly callers, zero revenue impact. Th
 | Concurrent jobs | 4 (configurable; matches Pi 5 core count) | Worker pool default 4; SQLite uncontended at this scale |
 | Sync latency (born-digital only) | p95 < 5s for a clean 10-page born-digital PDF on Pi 5. Measured 2026-07-05 on the target Pi 5 (stock arm64 container): ~10ms/page born-digital, ~1.1s/page through bundled Tesseract OCR — ~50× headroom for the target class. Re-measure under the hardened container in M1 | Violation = bug tripwire, not tuning signal; no perf work planned |
 | Sync latency (OCR path) | No target. OCR is ~1.1s/page (Tesseract, measured), so a scanned 10-pager takes ~11s synchronously — permitted (no sync limits, caller owns timeout risk) but the async path is the intended route for scanned documents | Sync stays limit-free; docs/README steer OCR-heavy workloads to `/v1/jobs` |
-| Sync latency (office docs) | No target. Each conversion spawns a fresh LibreOffice process — expect seconds of overhead per document, plus a memory spike (possibly hundreds of MB for large spreadsheets). Unmeasured; measure in M1 | Thread-pool bound (4) also caps concurrent soffice processes, protecting the Pi's shared RAM |
+| Sync latency (office docs) | No target. Each conversion spawns a fresh LibreOffice process — expect seconds of overhead per document, plus a memory spike (possibly hundreds of MB for large spreadsheets). Unmeasured; measure in M1 | Worker-pool bound (default 4) also caps concurrent soffice processes, protecting the Pi's shared RAM |
 | Async throughput | No deadline. A job is done when it's done; CPU VLM OCR at ~0.1 pages/s later is acceptable | No queue tuning, no priorities, no job SLAs |
 | Data loss | Losing all queued jobs/results = shrug; callers resubmit | Job persistence is convenience, not a durability promise; no backups of bscribe state |
 
@@ -221,7 +223,7 @@ Exposure: bscribe listens only on the tailnet (`marlin-tet.ts.net`) or LAN behin
 
 Threat scenarios:
 
-- **Malicious/malformed document.** The realistic attack surface: PDFium, Tesseract, ImageMagick (image→PDF; the worst CVE history of the set), and LibreOffice (office→PDF; headless conversion does not execute macros, but its parsers are another large C++ codebase) are all fed untrusted bytes. Mitigations: container runs as non-root with a read-only root filesystem and no added capabilities; memory/CPU limits at the container level; documents come only from authenticated callers (me); worst case is contained to a service whose entire state is disposable (see SLOs — data loss = shrug). ImageMagick additionally runs under a restrictive `policy.xml` baked into the image: SVG is an accepted input, and ImageMagick's SVG/MVG/MSL handling can trigger outbound fetches and local file reads (the ImageTragick class) — container hardening does not stop outbound requests on the tailnet, so the policy must disable remote-fetch coders and script-like formats. The exact policy (which coders/delegates to disable without breaking legitimate image→PDF conversion) is implementation-time research, tracked in M1.
+- **Malicious/malformed document.** The realistic attack surface: PDFium, Tesseract, ImageMagick (image→PDF; the worst CVE history of the set), and LibreOffice (office→PDF; headless conversion does not execute macros, but its parsers are another large C++ codebase) are all fed untrusted bytes. Mitigations: every parse runs in a disposable, recycled worker process — a crash or hang is contained to that one job and the worker is respawned (see Architecture); container runs as non-root with a read-only root filesystem and no added capabilities; memory/CPU limits at the container level; documents come only from authenticated callers (me); worst case is contained to a service whose entire state is disposable (see SLOs — data loss = shrug). ImageMagick additionally runs under a restrictive `policy.xml` baked into the image: SVG is an accepted input, and ImageMagick's SVG/MVG/MSL handling can trigger outbound fetches and local file reads (the ImageTragick class) — container hardening does not stop outbound requests on the tailnet, so the policy must disable remote-fetch coders and script-like formats. The exact policy (which coders/delegates to disable without breaking legitimate image→PDF conversion) is implementation-time research, tracked in M1.
 - **Leaked bearer token.** Second factor only — an attacker would also need tailnet access. Tokens are provisioned as static config (env/file), one named token per caller (e.g. `bsearch`, `adhoc`); revoking one caller = remove its token and restart, others unaffected. Tokens are principals: each token can see and delete only the jobs it created, so a leaked token exposes only that caller's transient jobs and results, not everything in the store. A revoked token's jobs sit orphaned until the TTL purge. There is no token-management API — that would creep toward user accounts (see Non-goals). Tokens never appear in logs or error responses; the token *name* may appear in logs to attribute requests.
 - **Compromised tailnet device.** Any tailnet device can reach the API with a token. Accepted: bscribe holds no stored documents to exfiltrate; the blast radius is that token's transient job results.
 - **SSRF via OCR endpoint.** The OCR server URL is operator-set config, not caller-supplied. No caller-controlled outbound requests exist in the API.
@@ -247,6 +249,7 @@ bscribe joins the existing Prometheus/Grafana stack. `/metrics` exposes:
 
 - HTTP request count + duration histograms, by endpoint and status
 - Jobs by state (gauge), job duration histogram split by `ocr_used`, queue depth
+- Worker pool health: counters for timeout kills, worker crashes, cancellations, recycles
 - A build/pipeline info metric carrying `pipeline_fingerprint` and component versions — a Grafana panel shows at a glance which pipeline version is live
 
 Instrumentation via `prometheus-client` + FastAPI middleware. Alerting stays in the existing stack: `up == 0` on the scrape target is the only alert worth having, per the availability SLO.
@@ -259,9 +262,9 @@ Instrumentation via `prometheus-client` + FastAPI middleware. Alerting stays in 
 
 Ordered by ROI: each demoable, value before scaffolding.
 
-**M1 — sync converter.** `POST /v1/convert` (markdown/text out, `ocr=auto|force|off` via liteparse's built-in Tesseract), all input formats (PDF, images, office docs — container ships ImageMagick + LibreOffice), bearer token auth, `/healthz`, multi-arch container image, restrictive ImageMagick `policy.xml` (exact coder policy researched here — see Security). No database. Demo: convert a real bank-statement scan and a `.docx` from curl on the tailnet. Measure office-conversion overhead on the Pi (unmeasured — see SLOs).
+**M1 — sync converter.** `POST /v1/convert` (markdown/text out, `ocr=auto|force|off` via liteparse's built-in Tesseract), all input formats (PDF, images, office docs — container ships ImageMagick + LibreOffice), bearer token auth, `/healthz`, multi-arch container image, restrictive ImageMagick `policy.xml` (exact coder policy researched here — see Security), worker process pool (default 4, configurable) with per-job timeout. No database. Demo: convert a real bank-statement scan and a `.docx` from curl on the tailnet. Measure office-conversion overhead on the Pi (unmeasured — see SLOs).
 
-**M2 — async jobs.** SQLite job store, worker pool (4), all `/v1/jobs` endpoints including list, TTL purge. Demo: submit a 100-page PDF, poll, fetch the result, watch it purge.
+**M2 — async jobs.** SQLite job store, all `/v1/jobs` endpoints including list and cancellation of running jobs, TTL purge. Demo: submit a 100-page PDF, poll, fetch the result, watch it purge.
 
 **M3 — contract + observability.** `GET /v1/info`, `pipeline` block in result metadata, `/metrics` + Grafana panel. This milestone makes bscribe safe to build bsearch against. Demo: bump liteparse, watch the fingerprint change.
 
@@ -283,7 +286,7 @@ Backlog (unordered, from Missing features): web UI, webhooks if polling ever ann
 - **Job queue infrastructure?** Resolved: none. SQLite + in-process workers; the SLOs (4 concurrent jobs, best-effort durability) don't justify Redis.
 - **How do callers know when to re-ingest?** Resolved: stateless fingerprint contract (`pipeline` metadata + `GET /v1/info`); callers own the tracking.
 - **Does liteparse actually run on Pi 5 / arm64?** Resolved by testing on the target hardware (2026-07-05, `python:3.14-slim` arm64 container on the Pi 5 via podman): PyPI publishes a proper aarch64 manylinux wheel (liteparse 2.4.0, bundled `libpdfium.so`), born-digital parsing works (~10ms/page), `is_complex` works, bundled Tesseract OCR works with zero setup (~1.1s/page), and image input works once ImageMagick is installed in the container (hard external dependency, clear error without it).
-- **Threads or processes for the worker pool?** Resolved: threads. liteparse's Python binding releases the GIL around all parse calls (`py.detach()`, verified in `liteparse-python/src/lib.rs`), so a thread pool gets true parallelism without process-pool complexity (result passing, cancellation).
+- **Threads or processes for the worker pool?** Resolved: **processes** — reversing an earlier threads decision. Threads were first chosen because liteparse's binding releases the GIL around parse calls (`py.detach()`, verified in `liteparse-python/src/lib.rs`), so thread parallelism is real and plumbing is zero. Reopened on failure-mode analysis: a thread wedged in a pathological native parse cannot be killed (the pool slot is lost until a container restart, with `/healthz` green throughout), and a segfault in PDFium/Tesseract/LibreOffice kills the API plus every in-flight job — and a caller auto-retrying a poison document turns that into a crash loop needing a human. A warm process pool (per-job timeout SIGKILL, per-job crash containment, worker recycling — pebble-style; stdlib pools rejected because `ProcessPoolExecutor` breaks the whole pool on one segfault and `multiprocessing.Pool` can't kill a running task) contains both failures to one disposable worker and makes real cancellation of running jobs possible. Costs accepted: ~200–400MB extra RSS, one dependency, a pickle boundary (results are strings — trivial). Workers never touch SQLite; the parent owns all job state, so no multi-writer concern.
 - **Office formats in v1 or later?** Resolved: v1. Verified in liteparse `conversion.rs` that office support is zero bscribe code — liteparse detects the extension and shells out to LibreOffice headless, with a fresh temp profile per conversion (concurrency-safe) and a 120s timeout. The costs are an ~400MB–1GB bigger image (accepted over maintaining slim/full variants) and LibreOffice joining the untrusted-input threat list. Originally deferred to backlog; pulled forward because the effort turned out to be a Dockerfile line plus docs.
 
 ## Open issues
