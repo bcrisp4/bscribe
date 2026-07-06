@@ -210,7 +210,7 @@ bscribe stays stateless — it never remembers what it parsed. Each result's `pi
 Callers (bsearch) store the whole `pipeline` block alongside each ingested document. On each ingest cycle:
 
 1. Stored fingerprint == `GET /v1/info` fingerprint → nothing changed anywhere, done.
-2. Otherwise, per document, one uniform rule: **re-parse iff any component on the document's stored path has a different current version.** OCR bumps never touch born-digital documents, LibreOffice bumps touch only office documents — no special cases per format.
+2. Otherwise, per document, one uniform rule: **re-parse if any component on the document's stored path has a different current version.** OCR bumps never touch born-digital documents, LibreOffice bumps touch only office documents — no special cases per format.
 
 `ocr_used` remains in metadata as a quality signal (OCR text may deserve less trust downstream), but carries no re-ingestion logic. Occasional unnecessary re-parses — a traversed component bumped without changing output for that document — are accepted at single-user scale.
 
