@@ -135,7 +135,7 @@ PDFium and Tesseract appear by name because they are part of the untrusted-input
 | `GET /v1/jobs/{id}` | Job status: `queued` \| `running` \| `done` \| `failed`. |
 | `GET /v1/jobs/{id}/result` | Result when done (`200`); `202` while `queued`/`running` (body carries current status); `409` for a terminal job with no result (`failed`). |
 | `DELETE /v1/jobs/{id}` | Cancel and purge a job in any state, always `204`. For `running` jobs the worker process is killed — real cancellation, a direct benefit of the process-pool execution model. |
-| `GET /v1/info` | Service/pipeline identity: current versions of bscribe, liteparse, OCR engine/model, and the current `pipeline_fingerprint`. Lets callers check "has the pipeline changed?" without submitting a document. |
+| `GET /v1/info` | Service/pipeline identity: current versions of **every** pipeline component (bscribe, liteparse, PDFium, Tesseract/OCR model, ImageMagick, LibreOffice) and the current `pipeline_fingerprint`. Lets callers check "has the pipeline changed?" without submitting a document. |
 | `GET /healthz` | Liveness (no auth). |
 | `GET /metrics` | Prometheus metrics (no auth, tailnet-internal). |
 
@@ -172,9 +172,11 @@ Content-Type: multipart/form-data
     "duration_ms": 412,
     "pipeline": {
       "fingerprint": "a41f7c2e9b03",
-      "bscribe": "1.2.0",
-      "parser": "liteparse/2.4.0",
-      "ocr": "tesseract/5.3"
+      "components": {
+        "bscribe": "1.2.0",
+        "liteparse": "2.4.0",
+        "pdfium": "138.0"
+      }
     }
   }
 }
@@ -203,7 +205,14 @@ Status code usage (audited against RFC 9110; the pattern for async polling follo
 
 ### Re-ingestion contract
 
-bscribe stays stateless — it never remembers what it parsed. Callers (bsearch) store the result's whole `pipeline` block (fingerprint **and** component versions) alongside each ingested document; on each ingest cycle they compare stored fingerprints against `GET /v1/info` and re-parse when different. The fingerprint is a hash of all output-affecting component versions and config. It is deliberately coarse — an OCR model bump changes it even for born-digital documents. The stored component versions are what make the escape hatch work: they tell the caller *which* component changed, so when only the OCR component differs, documents whose stored `ocr_used` is false can be skipped. The opaque fingerprint alone can't support that. Occasional unnecessary re-parses are accepted at single-user scale.
+bscribe stays stateless — it never remembers what it parsed. Each result's `pipeline.components` map lists the components the document **actually traversed**, with versions: a born-digital PDF traverses bscribe + liteparse + PDFium; a scan adds Tesseract; a `.docx` adds LibreOffice; an image adds ImageMagick. The `fingerprint` is a hash over *all* output-affecting component versions and config (including OCR model/language data), whether or not a given document used them.
+
+Callers (bsearch) store the whole `pipeline` block alongside each ingested document. On each ingest cycle:
+
+1. Stored fingerprint == `GET /v1/info` fingerprint → nothing changed anywhere, done.
+2. Otherwise, per document, one uniform rule: **re-parse iff any component on the document's stored path has a different current version.** OCR bumps never touch born-digital documents, LibreOffice bumps touch only office documents — no special cases per format.
+
+`ocr_used` remains in metadata as a quality signal (OCR text may deserve less trust downstream), but carries no re-ingestion logic. Occasional unnecessary re-parses — a traversed component bumped without changing output for that document — are accepted at single-user scale.
 
 ### Admin CLI
 
@@ -287,7 +296,7 @@ Ordered by ROI: each demoable, value before scaffolding.
 
 **M2 — async jobs.** SQLite job store, all `/v1/jobs` endpoints including list and cancellation of running jobs, TTL purge. Demo: submit a 100-page PDF, poll, fetch the result, watch it purge.
 
-**M3 — contract + observability.** `GET /v1/info`, `pipeline` block in result metadata, `/metrics` + Grafana panel. This milestone makes bscribe safe to build bsearch against. Demo: bump liteparse, watch the fingerprint change.
+**M3 — contract + observability.** `GET /v1/info`, `pipeline` block (fingerprint + components traversed) in result metadata, `/metrics` + Grafana panel. This milestone makes bscribe safe to build bsearch against. Demo: bump liteparse, watch the fingerprint change.
 
 **M4 — VLM OCR.** Deployment recipe for the surya OCR server (liteparse OCR API spec), config-only swap, backend choice per the inference decision in Open issues. Demo: a garbage scan through Tesseract vs surya, side by side.
 
@@ -305,7 +314,7 @@ Backlog (unordered, from Missing features): web UI, webhooks if polling ever ann
 
 - **How does VLM OCR integrate?** Resolved: behind liteparse's OCR HTTP API spec — surya-ocr-2 emits bbox-level blocks, and liteparse ships a reference surya server; the inference backend (llama.cpp/vLLM/remote) is that server's internal concern. bscribe changes = config only. A `ParserPort` adapter remains the escape hatch for hypothetical page-level-markdown models without bbox output.
 - **Job queue infrastructure?** Resolved: none. SQLite + in-process workers; the SLOs (4 concurrent jobs, best-effort durability) don't justify Redis.
-- **How do callers know when to re-ingest?** Resolved: stateless fingerprint contract (`pipeline` metadata + `GET /v1/info`); callers own the tracking.
+- **How do callers know when to re-ingest?** Resolved: stateless components-traversed contract — each result lists the components (with versions) the document actually went through; callers store the block and re-parse a document iff a component on its stored path changed, with the global fingerprint as a cheap short-circuit. Callers own the tracking. An earlier fingerprint-only version of this contract needed an `ocr_used` special case to avoid re-parsing born-digital docs on OCR bumps and silently mishandled ImageMagick/LibreOffice bumps; the per-path rule generalizes it away.
 - **Does liteparse actually run on Pi 5 / arm64?** Resolved by testing on the target hardware (2026-07-05, `python:3.14-slim` arm64 container on the Pi 5 via podman): PyPI publishes a proper aarch64 manylinux wheel (liteparse 2.4.0, bundled `libpdfium.so`), born-digital parsing works (~10ms/page), `is_complex` works, bundled Tesseract OCR works with zero setup (~1.1s/page), and image input works once ImageMagick is installed in the container (hard external dependency, clear error without it).
 - **Threads or processes for the worker pool?** Resolved: **processes** — reversing an earlier threads decision. Threads were first chosen because liteparse's binding releases the GIL around parse calls (`py.detach()`, verified in `liteparse-python/src/lib.rs`), so thread parallelism is real and plumbing is zero. Reopened on failure-mode analysis: a thread wedged in a pathological native parse cannot be killed (the pool slot is lost until a container restart, with `/healthz` green throughout), and a segfault in PDFium/Tesseract/LibreOffice kills the API plus every in-flight job — and a caller auto-retrying a poison document turns that into a crash loop needing a human. A warm process pool (per-job timeout SIGKILL, per-job crash containment, worker recycling — pebble-style; stdlib pools rejected because `ProcessPoolExecutor` breaks the whole pool on one segfault and `multiprocessing.Pool` can't kill a running task) contains both failures to one disposable worker and makes real cancellation of running jobs possible. Costs accepted: ~200–400MB extra RSS, one dependency, a pickle boundary (results are strings — trivial). Workers never touch SQLite; the parent owns all job state, so no multi-writer concern (the local admin CLI is the only other writer — WAL absorbs it, see Admin CLI).
 - **How are tokens provisioned?** Resolved: SQLite table + local admin CLI (`bscribe token add/list/delete` via `podman exec`), replacing an earlier static env/file scheme. The CLI wins on: immediate revocation (the server reads the token table per request — env config required a restart), immutable token ids for job ownership (labels can change without orphaning jobs), and secrets hashed at rest (SHA-256 — a copied DB yields no usable credentials). Cost: SQLite moves forward to M1. A token-management HTTP API stays rejected (see Non-goals); the management plane is host-local by design. bscribe provides no at-rest encryption — protecting the filesystem/volume is the operator's responsibility.
