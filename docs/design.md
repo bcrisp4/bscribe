@@ -28,7 +28,7 @@ There's also a privacy motivation: online converter sites are the easy alternati
 
 ## Non-goals
 
-- **No multi-user support.** Single user. No accounts, no tenants, no per-user quotas. Auth is a small set of static bearer tokens — one per caller so each can be revoked independently — not user identity.
+- **No user accounts.** Single human user. No accounts, no tenants, no per-user quotas, no token-management API. Auth is a small set of static bearer tokens, one per caller, each independently revocable. Tokens are principals — each sees only its own jobs (see Security) — but that is caller isolation, not user identity: no profiles, no roles, no admin scopes.
 - **No document storage.** bscribe is not a document store or DMS. Documents transit the service; results are retained briefly for async pickup only. Downstream services own their own storage.
 - **No semantic layer.** No embeddings, chunking, summarization, or entity extraction. Text/markdown out; downstream services own meaning.
 - **No hosted or commercial offering.** Open source on GitHub, but no hosted option and no commercial ambitions. Others self-host at their own risk.
@@ -128,7 +128,7 @@ PDFium and Tesseract appear by name because they are part of the untrusted-input
 |---|---|
 | `POST /v1/convert` | Synchronous conversion. Multipart upload; result inline in response. Runs on the same worker pool as async jobs — a sync request waits for a free slot, so total parse concurrency is bounded at 4 even during a connector backfill. No size/page limit — caller owns timeout risk (long conversions through proxies may need async instead). |
 | `POST /v1/jobs` | Asynchronous conversion. Same parameters as `/v1/convert`; returns a job id immediately. |
-| `GET /v1/jobs` | List jobs, newest first; `?status=` filter. |
+| `GET /v1/jobs` | List the calling token's jobs, newest first; `?status=` filter. |
 | `GET /v1/jobs/{id}` | Job status: `queued` \| `running` \| `done` \| `failed`. |
 | `GET /v1/jobs/{id}/result` | Result when done (`200`); `202` while `queued`/`running` (body carries current status); `409` for a terminal job with no result (`failed`). |
 | `DELETE /v1/jobs/{id}` | Cancel a `queued` job / purge a finished one. Returns `409` for `running` jobs — an in-flight native parse can't be interrupted. (Soft-cancel — mark cancelled, discard the result — could be added later without a version bump.) |
@@ -147,7 +147,7 @@ A configurable global max upload size (default 50MB, rejected with `413`) guards
 Job lifecycle details:
 
 - **Startup sweep.** Workers are in-process, so a container restart abandons `running` jobs. On boot, any job found in `running` is marked `failed` with detail `"interrupted by restart — resubmit"`, and the scratch dir is wiped — a restart mid-parse orphans uploaded files there. Re-queueing is not possible: the uploaded document lives in the scratch dir and may not survive the restart. Consistent with the data-loss SLO (callers resubmit).
-- **Caller attribution.** Jobs are stamped with the name of the bearer token that created them (see Security); `GET /v1/jobs` returns it and accepts a `?token=` filter. Attribution and filtering only — all tokens have equal access; this is not isolation.
+- **Ownership.** Jobs are owned by the bearer token that created them, and every job endpoint is token-scoped: `GET /v1/jobs` lists only the caller's jobs; `GET`/`DELETE` on another token's job returns `404`, indistinguishable from a nonexistent id, so job existence never leaks across tokens. There is no admin or list-all scope — the operator's debug path is querying SQLite directly on the host. The sync endpoint is unaffected (nothing stored to protect).
 
 ### Sample exchange
 
@@ -190,7 +190,7 @@ Status code usage (audited against RFC 9110; the pattern for async polling follo
 | `204` | Job deleted |
 | `400` | Malformed request (bad params, broken multipart) |
 | `401` | Missing/invalid bearer token |
-| `404` | Unknown job id |
+| `404` | Unknown job id, or a job owned by a different token (indistinguishable by design) |
 | `409` | State conflict: `DELETE` on a `running` job; result fetch on a `failed` job |
 | `413` | Upload exceeds max size |
 | `415` | Unsupported input format |
@@ -222,8 +222,8 @@ Exposure: bscribe listens only on the tailnet (`marlin-tet.ts.net`) or LAN behin
 Threat scenarios:
 
 - **Malicious/malformed document.** The realistic attack surface: PDFium, Tesseract, ImageMagick (image→PDF; the worst CVE history of the set), and LibreOffice (office→PDF; headless conversion does not execute macros, but its parsers are another large C++ codebase) are all fed untrusted bytes. Mitigations: container runs as non-root with a read-only root filesystem and no added capabilities; memory/CPU limits at the container level; documents come only from authenticated callers (me); worst case is contained to a service whose entire state is disposable (see SLOs — data loss = shrug). ImageMagick additionally runs under a restrictive `policy.xml` baked into the image: SVG is an accepted input, and ImageMagick's SVG/MVG/MSL handling can trigger outbound fetches and local file reads (the ImageTragick class) — container hardening does not stop outbound requests on the tailnet, so the policy must disable remote-fetch coders and script-like formats. The exact policy (which coders/delegates to disable without breaking legitimate image→PDF conversion) is implementation-time research, tracked in M1.
-- **Leaked bearer token.** Second factor only — an attacker would also need tailnet access. Tokens are provisioned as static config (env/file), one named token per caller (e.g. `bsearch`, `adhoc`); revoking one caller = remove its token and restart, others unaffected. There is no token-management API — that would creep toward user accounts (see Non-goals). Tokens never appear in logs or error responses; the token *name* may appear in logs to attribute requests.
-- **Compromised tailnet device.** Any tailnet device can reach the API with the token. Accepted: bscribe holds no stored documents to exfiltrate; the blast radius is transient job results.
+- **Leaked bearer token.** Second factor only — an attacker would also need tailnet access. Tokens are provisioned as static config (env/file), one named token per caller (e.g. `bsearch`, `adhoc`); revoking one caller = remove its token and restart, others unaffected. Tokens are principals: each token can see and delete only the jobs it created, so a leaked token exposes only that caller's transient jobs and results, not everything in the store. A revoked token's jobs sit orphaned until the TTL purge. There is no token-management API — that would creep toward user accounts (see Non-goals). Tokens never appear in logs or error responses; the token *name* may appear in logs to attribute requests.
+- **Compromised tailnet device.** Any tailnet device can reach the API with a token. Accepted: bscribe holds no stored documents to exfiltrate; the blast radius is that token's transient job results.
 - **SSRF via OCR endpoint.** The OCR server URL is operator-set config, not caller-supplied. No caller-controlled outbound requests exist in the API.
 
 Not addressed (deliberately): rate limiting, audit logging, multi-user isolation — see Non-goals.
