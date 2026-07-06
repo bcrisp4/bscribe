@@ -19,3 +19,6 @@ coverage.xml
 
 # Env
 .env
+
+# Implementation plans (deliberately not committed)
+docs/superpowers/plans/
