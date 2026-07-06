@@ -16,6 +16,10 @@ Status: bootstrapping. Only `GET /healthz` exists. Conversion API arrives milest
 
 **GitHub issues = source of truth for all work tracking.** Milestones M1–M4 mirror the design-doc milestones; every work item is an issue attached to one (`gh issue list --milestone "M1 — sync converter"`). Before starting work, find (or create) the issue; reference it in PRs (`Closes #N`). Don't track work in TODO files, the design doc, or anywhere else — scope/dependency changes get recorded on the issue itself.
 
+## GitHub repo settings
+
+`main` protected: required checks must pass before merge, GitHub auto-merge disabled — wait for green, then `gh pr merge --squash --delete-branch`. Conflicted dependabot PR → comment `@dependabot rebase` (still supported; merge/close comment commands deprecated 2026-01).
+
 ## Commands
 
 All tooling through uv (`uv run …`). Developer tasks = Make targets:
@@ -69,7 +73,7 @@ Package version from git tags via setuptools-scm — **no version string to bump
 
 ## Changelog (CI-enforced)
 
-Every behavior-changing PR must add entry under `[Unreleased]` in `CHANGELOG.md` (Keep a Changelog format, user's point of view, present tense). CI fails PR otherwise. Non-user-facing PR (docs-only, CI/tooling, refactor, test-only) → MUST apply `skip-changelog` label to the PR (`gh pr edit <n> --add-label skip-changelog`) or the changelog job fails. Policy: `docs/changelog.md`.
+Every behavior-changing PR must add entry under `[Unreleased]` in `CHANGELOG.md` (Keep a Changelog format, user's point of view, present tense). CI fails PR otherwise. Non-user-facing PR (docs-only, CI/tooling, refactor, test-only) → MUST apply `skip-changelog` label to the PR (`gh pr edit <n> --add-label skip-changelog`) or the changelog job fails. Dependabot PRs need no manual handling: runtime/build dep bumps get automated `### Dependencies` entries (`dependabot-changelog.yml` workflow), actions bumps are auto-labelled `skip-changelog`. Policy: `docs/changelog.md`.
 
 ## Testing conventions
 
