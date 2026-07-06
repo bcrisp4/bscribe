@@ -76,7 +76,7 @@ Package version from git tags via setuptools-scm — **no version string to bump
 
 ## Changelog (CI-enforced)
 
-Every PR that adds or changes functionality, capability, or dependencies must add entry under `[Unreleased]` in `CHANGELOG.md` (Keep a Changelog format, user's point of view, present tense) — **including internal groundwork not yet reachable over HTTP** (new adapters/engines/deps: milestone work is release-notes material, "behavior-changing" ≠ "endpoint-visible"). CI fails PR otherwise. `skip-changelog` label (`gh pr edit <n> --add-label skip-changelog`) strictly for docs-only, CI/tooling, pure-refactor, test-only PRs; in doubt → add entry. Dependabot PRs need no manual handling: runtime/build dep bumps get automated `### Dependencies` entries (`dependabot-changelog.yml` workflow), actions bumps are auto-labelled `skip-changelog`. Policy: `docs/changelog.md`.
+Every behavior-changing PR must add entry under `[Unreleased]` in `CHANGELOG.md` (Keep a Changelog format, user's point of view, present tense). CI fails PR otherwise. Non-user-facing PR (docs-only, CI/tooling, refactor, test-only) → MUST apply `skip-changelog` label to the PR (`gh pr edit <n> --add-label skip-changelog`) or the changelog job fails. Dependabot PRs need no manual handling: runtime/build dep bumps get automated `### Dependencies` entries (`dependabot-changelog.yml` workflow), actions bumps are auto-labelled `skip-changelog`. Policy: `docs/changelog.md`.
 
 ## Testing conventions
 
