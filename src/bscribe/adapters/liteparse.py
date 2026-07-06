@@ -10,6 +10,9 @@ issues):
 - ``ParseResult`` reports no ``ocr_used`` flag, so it is derived from the
   engine's own ``is_complex()`` pre-check — the same per-page
   ``needs_ocr`` signal liteparse's OCR routing uses internally.
+- ``liteparse.__version__`` is hardcoded to a stale ``"2.0.0"`` upstream;
+  when the pipeline-version metadata lands (M3), read the real version via
+  ``importlib.metadata.version("liteparse")``.
 """
 
 from __future__ import annotations

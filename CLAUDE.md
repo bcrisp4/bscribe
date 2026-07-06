@@ -20,6 +20,8 @@ Status: bootstrapping. Only `GET /healthz` exists. Conversion API arrives milest
 
 `main` protected: required checks must pass before merge, GitHub auto-merge disabled. All checks must be green before a PR can merge, but green CI is **not** merge authorization — only merge PRs with explicit, per-PR consent from the user (who also reviews, alongside Copilot). Merge command: `gh pr merge --squash --delete-branch`. Conflicted dependabot PR → comment `@dependabot rebase` (still supported; merge/close comment commands deprecated 2026-01).
 
+Adding/removing `skip-changelog` re-triggers CI itself (`labeled`/`unlabeled` types). Never `gh run rerun --failed` on the pre-label run: reruns reuse the original event payload (no label) and concurrency cancels the good labeled run.
+
 ## Commands
 
 All tooling through uv (`uv run …`). Developer tasks = Make targets:
@@ -54,6 +56,7 @@ Planned shape (per design doc; most lands M1–M3):
 - **Auth.** Bearer tokens = principals in SQLite as SHA-256 hashes. Provisioned only via local `bscribe` CLI (typer) — never over HTTP. Every job endpoint token-scoped. Cross-token access returns 404.
 - **API contract.** Path-versioned (`/v1`). Breaking change requires `/v2`. Errors = RFC 9457 `application/problem+json`. Status-code table in design doc = contract.
 - **Privacy hard rule.** Document content + extracted text never logged, any level. Filenames only at DEBUG. Logging = structlog JSON, data as keyword arguments, never f-strings.
+- **liteparse quirks** (verified 2.4.0): always construct with `quiet=True` (native stdout corrupts JSON logs); OCR control is boolean `ocr_enabled` only, no force mode; sole exception `ParseError` — message may quote document internals, never propagate it; `text` output preserves spatial layout (space-padded columns).
 
 ## ADRs
 
@@ -78,3 +81,5 @@ Every PR that adds or changes functionality, capability, or dependencies must ad
 ## Testing conventions
 
 Tests mirror source layout (`src/bscribe/foo.py` → `tests/unit/foo/test_foo.py`). pytest-asyncio auto mode. `httpx` drives FastAPI endpoints. Coverage = signal, not target.
+
+`tests/integration/` = real-engine tests (no mocks); runs in the normal pytest/CI sweep. Fixture provenance documented in its `__init__.py`.
