@@ -72,7 +72,9 @@ select = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "ARG", "FBT"]
+# S105-S107 (hardcoded "passwords"): tests hardcode fake ids and hashes by
+# nature, and `token_id` — an id, not a credential — trips the heuristic.
+"tests/**" = ["S101", "S105", "S106", "S107", "ARG", "FBT"]
 
 # Pydantic resolves field annotations at runtime, so TCH must not move imports
 # used in Settings annotations into `if TYPE_CHECKING` blocks.

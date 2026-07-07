@@ -91,8 +91,7 @@ class FakeJobStore:
         matches = [
             job
             for job in self.jobs.values()
-            if job.token_id == token_id
-            and (status is None or job.status is status)
+            if job.token_id == token_id and (status is None or job.status is status)
         ]
         return sorted(matches, key=lambda j: (j.created_at, j.id), reverse=True)
 

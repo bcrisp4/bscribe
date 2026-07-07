@@ -57,6 +57,17 @@ async def test_default_settings_built_from_env(
     assert app.state.settings.worker_count == 7
 
 
+async def test_job_store_built_at_factory_time() -> None:
+    """The job store is on app.state before any request is served."""
+    from bscribe.adapters.sqlite import SqliteJobStore
+    from bscribe.domain.ports import JobStorePort
+
+    app = create_app()
+
+    assert isinstance(app.state.job_store, SqliteJobStore)
+    assert isinstance(app.state.job_store, JobStorePort)
+
+
 async def test_unknown_path_returns_problem_json() -> None:
     """Error handlers are wired: 404 comes back as application/problem+json."""
     async with make_client() as client:
