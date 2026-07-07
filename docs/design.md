@@ -238,7 +238,7 @@ Deliberately loose — one user, retry-friendly callers, zero revenue impact. Th
 | Availability | Best effort; unavailable for a day = fine. Callers retry | No HA, no replicas, single container, restart-on-failure is the whole story |
 | Callers | 1–3 internal services + occasional curl | A handful of long-lived bearer tokens, one per caller; no rate limiting; no quotas |
 | Concurrent jobs | 4 (configurable; matches Pi 5 core count) | Worker pool default 4; SQLite uncontended at this scale |
-| Sync latency (born-digital only) | p95 < 5s for a clean 10-page born-digital PDF on Pi 5. Confirmed under the hardened v0.1.0 container on the target Pi 5 (2026-07-07): **9–11 ms/page** born-digital, unchanged from the pre-hardening baseline — ~50× headroom for the target class. Full method and figures in Appendix A | Violation = bug tripwire, not tuning signal; no perf work planned |
+| Sync latency (born-digital only) | p95 < 5s for a clean 10-page born-digital PDF on Pi 5. The 10-page p95 baseline was established 2026-07-05; the hardened v0.1.0 container re-confirms the underlying **9–11 ms/page** rate on the Pi 5 (2026-07-07, single-page fixture) unchanged, so hardening adds no parse overhead and the p95 holds with ~50× headroom. Method and figures in Appendix A | Violation = bug tripwire, not tuning signal; no perf work planned |
 | Sync latency (OCR path) | No target. OCR is ~1.1s/page (Tesseract, measured), so a scanned 10-pager takes ~11s synchronously — permitted (well inside the per-job timeout; caller owns HTTP/proxy timeout risk) but the async path is the intended route for scanned documents | Sync stays limit-free; docs/README steer OCR-heavy workloads to `/v1/jobs` |
 | Sync latency (office docs) | No target. Each conversion spawns a fresh LibreOffice process. Measured on the Pi 5 (2026-07-07, hardened v0.1.0): **~2.1 s/page** (6.4 s for a 3-page `.doc`, LibreOffice spin-up dominating), and container RSS peaking at **~1.14 GB** under 4 concurrent office conversions from a ~324 MB idle — no OOM under a 2 GB cap. Details in Appendix A | Worker-pool bound (default 4) also caps concurrent soffice processes, protecting the Pi's shared RAM; size the container `--memory` cap above the expected peak |
 | Async throughput | No deadline. A job is done when it's done; CPU VLM OCR at ~0.1 pages/s later is acceptable | No queue tuning, no priorities, no job SLAs |
@@ -365,10 +365,10 @@ checkout — on **2026-07-07**.
 | Tesseract OCR data | `tessdata_best` `eng.traineddata`, pinned to commit `e12c65a915945e4c28e237a9b52bc4a8f39a0cec` (sha256 `8280aed0782fe27257a68ea10fe7ef324ca0f8d85bd2fd145d1c2b560bcb66ba`), baked at build |
 | PDFium, Tesseract engine | bundled in the liteparse 2.4.0 wheel |
 
-Test documents were the liteparse `integration_tests_data` fixtures plus the
-repo's `tests/integration/data/sample.pdf`: a born-digital PDF, a 3-page `.doc`,
-and a scanned receipt PNG. Latencies are read from each response's
-`metadata.duration_ms` / `metadata.pages`.
+Test documents: the born-digital PDF was the repo's
+`tests/integration/data/sample.pdf`; the 3-page `.doc` and the scanned receipt
+PNG were liteparse `integration_tests_data` fixtures. Latencies are read from
+each response's `metadata.duration_ms` / `metadata.pages`.
 
 ### Results
 
