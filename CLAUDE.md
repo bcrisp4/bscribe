@@ -59,7 +59,7 @@ Planned shape (per design doc; most lands M1–M3):
 - **Auth.** Bearer tokens = principals in SQLite as SHA-256 hashes. Provisioned only via local `bscribe` CLI (typer) — never over HTTP. Every job endpoint token-scoped. Cross-token access returns 404.
 - **API contract.** Path-versioned (`/v1`). Breaking change requires `/v2`. Errors = RFC 9457 `application/problem+json`. Status-code table in design doc = contract.
 - **Privacy hard rule.** Document content + extracted text never logged, any level. Filenames only at DEBUG. Logging = structlog JSON, data as keyword arguments, never f-strings.
-- **liteparse quirks** (verified 2.4.0): always construct with `quiet=True` (native stdout corrupts JSON logs); OCR control is boolean `ocr_enabled` only, no force mode; sole exception `ParseError` — message may quote document internals, never propagate it; `text` output preserves spatial layout (space-padded columns).
+- **liteparse quirks** (verified 2.4.0): always construct with `quiet=True` (native stdout corrupts JSON logs); OCR control is boolean `ocr_enabled` only, no force mode; sole exception `ParseError` — message may quote document internals, never propagate it; `text` output preserves spatial layout (space-padded columns). **OCR is not bundled** — the `tesseract-rs` binding downloads `eng.traineddata` (tessdata_best) from GitHub to `$HOME/.tesseract-rs` on first OCR; the container bakes it at build (pinned commit+sha256) so OCR runs offline under read-only rootfs / non-root (see Dockerfile). **SVG on the Debian IM6 image** renders via librsvg (`rsvg-convert`, needs `librsvg2-bin`), not IM's internal MSVG — missing it → SVG uploads `422`; `gs` is only liteparse's presence-gate for svg/eps/ps/ai, not the SVG renderer.
 
 ## ADRs
 
