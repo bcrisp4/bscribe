@@ -1,9 +1,13 @@
-"""Domain models for document conversion."""
+"""Domain models for document conversion and caller identity."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 
 class OutputFormat(StrEnum):
@@ -44,3 +48,26 @@ class ParsedDocument:
     content: str
     pages: int
     duration_ms: float
+
+
+@dataclass(frozen=True, slots=True)
+class Token:
+    """A bearer-token principal (docs/design.md — Admin CLI, Security).
+
+    Carries only the SHA-256 hash of the secret, never the plaintext —
+    the plaintext exists once, at mint time, and is shown to the operator
+    exactly once (see :func:`bscribe.domain.tokens.mint_token`).
+
+    Attributes:
+        id: Short opaque immutable identifier; jobs stamp it, so relabeling
+            never orphans jobs.
+        label: Human-readable caller name (e.g. ``bsearch``); may appear in
+            logs, unlike secrets.
+        secret_hash: SHA-256 hex digest of the full secret string.
+        created_at: Creation time, UTC-aware.
+    """
+
+    id: str
+    label: str
+    secret_hash: str
+    created_at: datetime

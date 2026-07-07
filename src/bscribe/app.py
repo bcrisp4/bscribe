@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import structlog
 from fastapi import FastAPI, Request, Response
 
+from bscribe.adapters.sqlite import SqliteTokenStore
 from bscribe.errors import register_error_handlers
 from bscribe.log import configure_logging
 from bscribe.settings import Settings
@@ -55,6 +56,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="bscribe", lifespan=lifespan)
     app.state.settings = settings
+    # Factory-time (not lifespan): construction is cheap, creates the schema
+    # if missing, and tests can swap in a fake before serving a request.
+    # Auth reads it per request via bscribe.auth.require_token.
+    app.state.token_store = SqliteTokenStore(settings.db_path)
     register_error_handlers(app)
 
     # pyright strict flags decorator-registered nested handlers as unused

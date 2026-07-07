@@ -47,6 +47,9 @@ Run server locally:
 uv run uvicorn --factory bscribe.app:create_app --reload
 ```
 
+Python 3.14 note: ruff formats `except (A, B):` to unparenthesized
+`except A, B:` (PEP 758) — valid 3.14 syntax, not a Py2 regression.
+
 ## Architecture
 
 Planned shape (per design doc; most lands M1–M3):
@@ -72,7 +75,7 @@ Architectural decisions — expensive-to-reverse ones (language/framework/db, st
 
 Package version from git tags via setuptools-scm — **no version string to bump** in `pyproject.toml`. Release = push semver tag (`v0.2.0`). Full procedure incl. changelog roll: `docs/releasing.md`.
 
-`pyproject.toml` lists `SETUPTOOLS_SCM_PRETEND_VERSION_FOR_BSCRIBE` under `[tool.uv] cache-keys` — uv caches built wheels by file content, not env vars. Without it, container builds ship stale versions. Keep if touching Dockerfile or release flow.
+`pyproject.toml` lists `SETUPTOOLS_SCM_PRETEND_VERSION_FOR_BSCRIBE` under `[tool.uv] cache-keys` — uv caches built wheels by file content, not env vars. Without it, container builds ship stale versions. cache-keys deliberately exclude `src/**` (a src glob invalidates on regenerated `_version.py` mtime → permanent rebuild loop on every `uv run`); image freshness instead comes from `--reinstall-package bscribe` in the Dockerfile `uv sync`. Keep all three if touching Dockerfile or release flow.
 
 ## Changelog (CI-enforced)
 

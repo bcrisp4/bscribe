@@ -225,7 +225,7 @@ The container image ships a `bscribe` CLI — one entrypoint for both the server
 | `bscribe token list` | ids, labels, created timestamps — never secrets |
 | `bscribe token delete <id>` | Revoke, effective immediately — the server checks the token table per request, no restart |
 
-Token model: `(id, label, secret_hash, created_at)`. `id` is short, opaque, immutable; jobs stamp `token_id`, so relabeling never orphans jobs. Secrets are stored as SHA-256 hashes — lookup hashes the presented bearer token — so a copied database yields no usable credentials. A lost secret is unrecoverable: rotate by `delete` + `add`. A deleted token's jobs become unreachable (there is no admin read path over jobs) and age out via the normal TTL purge.
+Token model: `(id, label, secret_hash, created_at)`. `id` is short, opaque, immutable; jobs stamp `token_id`, so relabeling never orphans jobs. Secrets are generated as 256-bit random values with a `bscribe_` marker prefix (grep-able, secret-scanner friendly; the full string, prefix included, is what gets hashed) and stored as unsalted SHA-256 hashes — sound for random keys, unlike passwords, since there is no dictionary to attack. Lookup hashes the presented bearer token, so a copied database yields no usable credentials. A lost secret is unrecoverable: rotate by `delete` + `add`. A deleted token's jobs become unreachable (there is no admin read path over jobs) and age out via the normal TTL purge.
 
 The CLI writing SQLite while the server runs is the one genuine multi-process access pattern; WAL mode + `busy_timeout` absorb it.
 

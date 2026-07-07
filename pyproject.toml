@@ -12,8 +12,12 @@ dependencies = [
     "pebble>=5.2",
     "pydantic-settings>=2.14.2",
     "structlog>=26.1.0",
+    "typer>=0.15",
     "uvicorn[standard]",
 ]
+
+[project.scripts]
+bscribe = "bscribe.cli:app"
 
 [project.urls]
 Homepage = "https://github.com/bcrisp4/bscribe"
@@ -32,6 +36,10 @@ version_file = "src/bscribe/_version.py"
 # uv caches the built project by file contents, NOT by env vars, so without this
 # a cached wheel would ship a stale version when only the build arg changes.
 # Listing the env var as a cache key makes uv rebuild when the version changes.
+# NOTE: these keys deliberately do NOT include src/**: a src glob invalidates
+# on the regenerated _version.py mtime and puts dev `uv run` in a permanent
+# rebuild loop. The Dockerfile instead passes --reinstall-package bscribe so
+# image builds never reuse a stale wheel after src-only changes.
 [tool.uv]
 cache-keys = [
     { file = "pyproject.toml" },
