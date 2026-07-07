@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policymap [
+  <!ELEMENT policymap (policy)*>
+  <!ATTLIST policymap xmlns CDATA #FIXED ''>
+  <!ELEMENT policy EMPTY>
+  <!ATTLIST policy xmlns CDATA #FIXED '' domain NMTOKEN #REQUIRED
+    name NMTOKEN #IMPLIED pattern CDATA #IMPLIED rights NMTOKEN #IMPLIED
+    stealth NMTOKEN #IMPLIED value CDATA #IMPLIED>
+]>
+<!--
+  bscribe hardened ImageMagick policy (see docs/design.md — Security).
+
+  ImageMagick is fed untrusted documents (image -> PDF conversion, incl. SVG).
+  Its worst CVE class is ImageTragick: SVG/MVG/MSL handling that triggers
+  outbound fetches and local file reads. Container hardening (read-only rootfs,
+  dropped caps) does NOT stop outbound requests on the tailnet, so the policy is
+  the control that must.
+
+  This file REPLACES Debian's stock /etc/ImageMagick-6/policy.xml. That default
+  disables the PDF/PS/EPS coders (post-Ghostscript-CVE); we deliberately leave
+  them enabled because our whole job is image -> PDF (PDF write) and the SVG
+  delegate can route through Ghostscript (PS/EPS). We re-add the ImageTragick
+  mitigations that actually matter here: no network coders, no script coders,
+  no indirect (@) reads, plus resource limits to bound DoS on hostile input.
+
+  A coder/delegate not listed here remains ENABLED (ImageMagick default-allow),
+  so the formats we need (PDF, PS, EPS, PNG, JPEG, GIF, BMP, TIFF, WEBP, SVG)
+  work without explicit allow rules.
+-->
+<policymap>
+  <!-- Resource limits: bound memory/CPU/disk on untrusted input (a malformed
+       or decompression-bomb image otherwise exhausts the worker). Conservative
+       for the Raspberry Pi 5 target (memory shared across workers + the
+       container `--memory` cap is the real backstop). A genuinely huge scan
+       (decoded raster over ~512MiB / 256MP) is rejected as a failed convert;
+       raise these if a legitimate large-format document hits the ceiling. -->
+  <policy domain="resource" name="memory" value="512MiB"/>
+  <policy domain="resource" name="map" value="1GiB"/>
+  <policy domain="resource" name="width" value="32KP"/>
+  <policy domain="resource" name="height" value="32KP"/>
+  <policy domain="resource" name="area" value="256MP"/>
+  <policy domain="resource" name="disk" value="2GiB"/>
+  <policy domain="resource" name="time" value="120"/>
+
+  <!-- No indirect reads: `@file` / `label:@file` pull in local file contents. -->
+  <policy domain="path" rights="none" pattern="@*"/>
+
+  <!-- No network coders: an SVG href/xlink must never trigger an outbound fetch. -->
+  <policy domain="coder" rights="none" pattern="URL"/>
+  <policy domain="coder" rights="none" pattern="HTTPS"/>
+  <policy domain="coder" rights="none" pattern="HTTP"/>
+  <policy domain="coder" rights="none" pattern="FTP"/>
+  <policy domain="coder" rights="none" pattern="MHTML"/>
+
+  <!-- No delegate-driven network fetches either. -->
+  <policy domain="delegate" rights="none" pattern="URL"/>
+  <policy domain="delegate" rights="none" pattern="HTTPS"/>
+  <policy domain="delegate" rights="none" pattern="HTTP"/>
+
+  <!-- No script-like coders (the ImageTragick execution surface). -->
+  <policy domain="coder" rights="none" pattern="MSL"/>
+  <policy domain="coder" rights="none" pattern="MVG"/>
+  <policy domain="coder" rights="none" pattern="TEXT"/>
+  <policy domain="coder" rights="none" pattern="LABEL"/>
+  <policy domain="coder" rights="none" pattern="SHOW"/>
+  <policy domain="coder" rights="none" pattern="WIN"/>
+  <policy domain="coder" rights="none" pattern="PLT"/>
+  <policy domain="coder" rights="none" pattern="XPS"/>
+</policymap>
