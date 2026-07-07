@@ -3,10 +3,45 @@
 from __future__ import annotations
 
 import dataclasses
+from datetime import UTC, datetime
 
 import pytest
 
-from bscribe.domain.models import OcrMode, OutputFormat, ParsedDocument
+from bscribe.domain.models import (
+    Job,
+    JobStatus,
+    OcrMode,
+    OutputFormat,
+    ParsedDocument,
+)
+
+
+def make_job(
+    *,
+    id: str = "abcd1234abcd1234",  # noqa: A002 - mirrors the field name
+    token_id: str = "feed0001",
+    output: OutputFormat = OutputFormat.MARKDOWN,
+    ocr: OcrMode = OcrMode.AUTO,
+    status: JobStatus = JobStatus.QUEUED,
+    created_at: datetime | None = None,
+    started_at: datetime | None = None,
+    finished_at: datetime | None = None,
+    failure_detail: str | None = None,
+    result: ParsedDocument | None = None,
+) -> Job:
+    """Build a Job with sensible defaults (a freshly queued job)."""
+    return Job(
+        id=id,
+        token_id=token_id,
+        output=output,
+        ocr=ocr,
+        status=status,
+        created_at=created_at or datetime(2026, 7, 7, 12, 0, tzinfo=UTC),
+        started_at=started_at,
+        finished_at=finished_at,
+        failure_detail=failure_detail,
+        result=result,
+    )
 
 
 def make_parsed_document(
@@ -44,6 +79,87 @@ class TestOcrMode:
     def test_force_absent(self) -> None:
         # liteparse has no force-OCR; see docs/design.md Closed issues.
         assert len(OcrMode) == 2
+
+
+class TestJobStatus:
+    """Enum values are the wire strings from the API contract."""
+
+    def test_wire_values(self) -> None:
+        assert JobStatus.QUEUED.value == "queued"
+        assert JobStatus.RUNNING.value == "running"
+        assert JobStatus.DONE.value == "done"
+        assert JobStatus.FAILED.value == "failed"
+
+    def test_exactly_four_states(self) -> None:
+        assert len(JobStatus) == 4
+
+
+class TestJob:
+    """A job is an immutable snapshot; transitions happen in the store."""
+
+    def test_carries_submission_fields(self) -> None:
+        job = make_job(token_id="cafe0001", ocr=OcrMode.OFF)
+        assert job.token_id == "cafe0001"
+        assert job.output is OutputFormat.MARKDOWN
+        assert job.ocr is OcrMode.OFF
+        assert job.status is JobStatus.QUEUED
+
+    def test_optional_fields_default_none_for_queued_job(self) -> None:
+        job = make_job()
+        assert job.started_at is None
+        assert job.finished_at is None
+        assert job.failure_detail is None
+        assert job.result is None
+
+    def test_done_job_carries_result(self) -> None:
+        result = make_parsed_document()
+        job = make_job(status=JobStatus.DONE, result=result)
+        assert job.result == result
+
+    def test_is_frozen(self) -> None:
+        job = make_job()
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            job.status = JobStatus.DONE  # type: ignore[misc]
+
+    def test_lifecycle_fields_default_to_none(self) -> None:
+        job = Job(
+            id="abcd1234abcd1234",
+            token_id="feed0001",
+            output=OutputFormat.MARKDOWN,
+            ocr=OcrMode.AUTO,
+            status=JobStatus.QUEUED,
+            created_at=datetime(2026, 7, 7, tzinfo=UTC),
+        )
+        assert job.started_at is None
+        assert job.finished_at is None
+        assert job.failure_detail is None
+        assert job.result is None
+
+    def test_done_without_result_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="done"):
+            make_job(status=JobStatus.DONE, result=None)
+
+    def test_failed_without_detail_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="failed"):
+            make_job(status=JobStatus.FAILED, failure_detail=None)
+
+    def test_result_on_non_done_job_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="result"):
+            make_job(status=JobStatus.RUNNING, result=make_parsed_document())
+
+    def test_failure_detail_on_non_failed_job_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="failure_detail"):
+            make_job(status=JobStatus.QUEUED, failure_detail="oops")
+
+    @pytest.mark.parametrize("field", ["created_at", "started_at", "finished_at"])
+    def test_naive_timestamps_are_rejected(self, field: str) -> None:
+        # Naive datetimes serialize without an offset and break the store's
+        # lexicographic ordering; the model rejects them at the source.
+        overrides: dict[str, object] = {field: datetime(2026, 7, 7, 12, 0)}  # noqa: DTZ001
+        if field != "created_at":
+            overrides["status"] = JobStatus.RUNNING
+        with pytest.raises(ValueError, match=field):
+            make_job(**overrides)  # type: ignore[arg-type]
 
 
 class TestParsedDocument:

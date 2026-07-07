@@ -1,4 +1,4 @@
-"""SQLite adapter for token persistence.
+"""SQLite adapter for token and job persistence.
 
 The only module that speaks SQL (docs/adr/0002). Raw stdlib ``sqlite3``,
 one short-lived connection per operation: fresh connections sidestep
@@ -12,10 +12,17 @@ from __future__ import annotations
 import sqlite3
 import time
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from bscribe.domain.models import Token
+from bscribe.domain.models import (
+    Job,
+    JobStatus,
+    OcrMode,
+    OutputFormat,
+    ParsedDocument,
+    Token,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -24,7 +31,8 @@ if TYPE_CHECKING:
 _BUSY_TIMEOUT_MS = 5000
 
 # user_version-gated migrations: entry N runs when user_version == N, then
-# bumps to N+1. Append-only — M2's jobs table is the next entry.
+# bumps to N+1. Append-only, one statement per entry (the runner uses
+# conn.execute, which takes exactly one statement).
 _MIGRATIONS: tuple[str, ...] = (
     """
     CREATE TABLE tokens (
@@ -34,7 +42,195 @@ _MIGRATIONS: tuple[str, ...] = (
         created_at  TEXT NOT NULL
     ) STRICT
     """,
+    # Deliberately no FOREIGN KEY to tokens: a deleted token's jobs orphan
+    # until the TTL purge (docs/design.md — Admin CLI), and we never enable
+    # PRAGMA foreign_keys anyway. Terminal-state invariants (done => result,
+    # failed => failure_detail) are enforced by the guarded transitions in
+    # SqliteJobStore, not by CHECKs.
+    """
+    CREATE TABLE jobs (
+        id                 TEXT PRIMARY KEY,
+        token_id           TEXT NOT NULL,
+        output             TEXT NOT NULL,
+        ocr                TEXT NOT NULL,
+        status             TEXT NOT NULL
+            CHECK (status IN ('queued', 'running', 'done', 'failed')),
+        failure_detail     TEXT,
+        created_at         TEXT NOT NULL,
+        started_at         TEXT,
+        finished_at        TEXT,
+        result_content     TEXT,
+        result_pages       INTEGER,
+        result_duration_ms REAL
+    ) STRICT
+    """,
+    # Serves the one job query shape: per-token listing, newest first. The
+    # id tiebreak in that ORDER BY still needs a small temp B-tree over
+    # created_at ties (id is not the rowid) — immaterial at this scale.
+    "CREATE INDEX jobs_token_created ON jobs (token_id, created_at DESC)",
 )
+
+
+def _ensure_schema(db_path: Path) -> None:
+    """Create parent directories and bring the schema up to date.
+
+    Shared by every store class in this module — one ``user_version``
+    governs the whole file, so whichever store is constructed first runs
+    all pending migrations.
+    """
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    # Two connections switching a fresh database into WAL can collide
+    # with "database is locked" *despite* busy_timeout — the busy
+    # handler does not cover the journal-mode switch. Server startup
+    # racing `podman exec … token add` hits exactly this, so retry with
+    # backoff rather than die. Only lock contention is retryable;
+    # permanent failures (unwritable volume, corrupt file) surface
+    # immediately with their real error.
+    for delay_seconds in (0.05, 0.1, 0.2, 0.4, None):
+        try:
+            _init_schema_once(db_path)
+        except sqlite3.OperationalError as exc:
+            retryable = exc.sqlite_errorcode in (
+                sqlite3.SQLITE_BUSY,
+                sqlite3.SQLITE_LOCKED,
+            )
+            if delay_seconds is None or not retryable:
+                raise
+            time.sleep(delay_seconds)
+        else:
+            return
+
+
+def _init_schema_once(db_path: Path) -> None:
+    """Run one migration attempt; raises on lock contention (see caller)."""
+    # autocommit=True: journal_mode cannot change inside a transaction,
+    # and the migration manages its own BEGIN IMMEDIATE explicitly.
+    conn = sqlite3.connect(db_path, autocommit=True)
+    try:
+        conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+        # Fast path: schema current AND journal mode still WAL (it
+        # persists in the file but can be flipped externally, and ADR
+        # 0002's second-writer story depends on it). Reading both takes
+        # no write lock, so store construction — including read-only
+        # CLI commands — never queues behind an in-flight writer.
+        (version,) = conn.execute("PRAGMA user_version").fetchone()
+        (journal_mode,) = conn.execute("PRAGMA journal_mode").fetchone()
+        if version >= len(_MIGRATIONS) and journal_mode == "wal":
+            return
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            # Re-read under the write lock: another process may have
+            # migrated between our connect and the BEGIN.
+            (version,) = conn.execute("PRAGMA user_version").fetchone()
+            for number, ddl in enumerate(_MIGRATIONS[version:], start=version):
+                conn.execute(ddl)
+                # PRAGMA cannot be parameterized; `number` is a local int.
+                conn.execute(f"PRAGMA user_version = {number + 1}")
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.close()
+
+
+@contextmanager
+def _connect(db_path: Path) -> Generator[sqlite3.Connection]:
+    """One transaction per operation: commit on success, always close.
+
+    ``with sqlite3.connect(...)`` alone commits but never closes —
+    per-operation connections must close to release WAL file handles.
+    """
+    conn = sqlite3.connect(db_path, autocommit=False)
+    try:
+        conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
+
+
+_JOB_COLUMNS = (
+    "id, token_id, output, ocr, status, failure_detail,"
+    " created_at, started_at, finished_at,"
+    " result_content, result_pages, result_duration_ms"
+)
+
+
+def _to_utc_iso(value: datetime) -> str:
+    """Serialize an aware datetime as UTC isoformat TEXT (sortable)."""
+    return value.astimezone(UTC).isoformat()
+
+
+def _row_to_job(
+    row: tuple[
+        str,
+        str,
+        str,
+        str,
+        str,
+        str | None,
+        str,
+        str | None,
+        str | None,
+        str | None,
+        int | None,
+        float | None,
+    ],
+) -> Job:
+    """Map a jobs row (in ``_JOB_COLUMNS`` order) back to a :class:`Job`.
+
+    Raises:
+        ValueError: The row violates a Job invariant — result columns
+            partially populated, or a state combination
+            :meth:`Job.__post_init__` rejects. Only reachable through
+            external edits (the operator's sanctioned debug path is raw
+            SQLite); the message carries the job id, never stored content.
+    """
+    (
+        job_id,
+        token_id,
+        output,
+        ocr,
+        status,
+        failure_detail,
+        created_at,
+        started_at,
+        finished_at,
+        result_content,
+        result_pages,
+        result_duration_ms,
+    ) = row
+    result = None
+    if result_content is not None:
+        # mark_done writes all three columns atomically; a partial set means
+        # the row was edited outside the store. Fail loudly — an explicit
+        # raise, not an assert, so the guard survives python -O.
+        if result_pages is None or result_duration_ms is None:
+            msg = f"job {job_id}: result columns partially populated"
+            raise ValueError(msg)
+        result = ParsedDocument(
+            content=result_content,
+            pages=result_pages,
+            duration_ms=result_duration_ms,
+        )
+    return Job(
+        id=job_id,
+        token_id=token_id,
+        output=OutputFormat(output),
+        ocr=OcrMode(ocr),
+        status=JobStatus(status),
+        created_at=datetime.fromisoformat(created_at),
+        started_at=(
+            datetime.fromisoformat(started_at) if started_at is not None else None
+        ),
+        finished_at=(
+            datetime.fromisoformat(finished_at) if finished_at is not None else None
+        ),
+        failure_detail=failure_detail,
+        result=result,
+    )
 
 
 def _row_to_token(row: tuple[str, str, str, str]) -> Token:
@@ -63,77 +259,7 @@ class SqliteTokenStore:
             db_path: SQLite file location; parent directories are created.
         """
         self._db_path = db_path
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_schema()
-
-    def _init_schema(self) -> None:
-        # Two connections switching a fresh database into WAL can collide
-        # with "database is locked" *despite* busy_timeout — the busy
-        # handler does not cover the journal-mode switch. Server startup
-        # racing `podman exec … token add` hits exactly this, so retry with
-        # backoff rather than die. Only lock contention is retryable;
-        # permanent failures (unwritable volume, corrupt file) surface
-        # immediately with their real error.
-        for delay_seconds in (0.05, 0.1, 0.2, 0.4, None):
-            try:
-                self._init_schema_once()
-            except sqlite3.OperationalError as exc:
-                retryable = exc.sqlite_errorcode in (
-                    sqlite3.SQLITE_BUSY,
-                    sqlite3.SQLITE_LOCKED,
-                )
-                if delay_seconds is None or not retryable:
-                    raise
-                time.sleep(delay_seconds)
-            else:
-                return
-
-    def _init_schema_once(self) -> None:
-        # autocommit=True: journal_mode cannot change inside a transaction,
-        # and the migration manages its own BEGIN IMMEDIATE explicitly.
-        conn = sqlite3.connect(self._db_path, autocommit=True)
-        try:
-            conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
-            # Fast path: schema current AND journal mode still WAL (it
-            # persists in the file but can be flipped externally, and ADR
-            # 0002's second-writer story depends on it). Reading both takes
-            # no write lock, so store construction — including read-only
-            # CLI commands — never queues behind an in-flight writer.
-            (version,) = conn.execute("PRAGMA user_version").fetchone()
-            (journal_mode,) = conn.execute("PRAGMA journal_mode").fetchone()
-            if version >= len(_MIGRATIONS) and journal_mode == "wal":
-                return
-            conn.execute("PRAGMA journal_mode = WAL")
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                # Re-read under the write lock: another process may have
-                # migrated between our connect and the BEGIN.
-                (version,) = conn.execute("PRAGMA user_version").fetchone()
-                for number, ddl in enumerate(_MIGRATIONS[version:], start=version):
-                    conn.execute(ddl)
-                    # PRAGMA cannot be parameterized; `number` is a local int.
-                    conn.execute(f"PRAGMA user_version = {number + 1}")
-                conn.execute("COMMIT")
-            except BaseException:
-                conn.execute("ROLLBACK")
-                raise
-        finally:
-            conn.close()
-
-    @contextmanager
-    def _connect(self) -> Generator[sqlite3.Connection]:
-        """One transaction per operation: commit on success, always close.
-
-        ``with sqlite3.connect(...)`` alone commits but never closes —
-        per-operation connections must close to release WAL file handles.
-        """
-        conn = sqlite3.connect(self._db_path, autocommit=False)
-        try:
-            conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
-            yield conn
-            conn.commit()
-        finally:
-            conn.close()
+        _ensure_schema(db_path)
 
     def add(self, token: Token) -> None:
         """Persist a new token.
@@ -146,7 +272,7 @@ class SqliteTokenStore:
                 (astronomically rare with generated values — see
                 docs/adr/0002).
         """
-        with self._connect() as conn:
+        with _connect(self._db_path) as conn:
             conn.execute(
                 "INSERT INTO tokens (id, label, secret_hash, created_at)"
                 " VALUES (?, ?, ?, ?)",
@@ -167,7 +293,7 @@ class SqliteTokenStore:
         Returns:
             The matching token, or ``None``.
         """
-        with self._connect() as conn:
+        with _connect(self._db_path) as conn:
             row = conn.execute(
                 "SELECT id, label, secret_hash, created_at FROM tokens"
                 " WHERE secret_hash = ?",
@@ -181,7 +307,7 @@ class SqliteTokenStore:
         Returns:
             All token records, ``created_at`` descending.
         """
-        with self._connect() as conn:
+        with _connect(self._db_path) as conn:
             rows = conn.execute(
                 "SELECT id, label, secret_hash, created_at FROM tokens"
                 " ORDER BY created_at DESC"
@@ -197,6 +323,201 @@ class SqliteTokenStore:
         Returns:
             ``True`` if a row was deleted, ``False`` for an unknown id.
         """
-        with self._connect() as conn:
+        with _connect(self._db_path) as conn:
             cursor = conn.execute("DELETE FROM tokens WHERE id = ?", (token_id,))
+            return cursor.rowcount > 0
+
+
+class SqliteJobStore:
+    """JobStorePort implementation backed by a SQLite file.
+
+    Shares the database file, migrations, and connection discipline with
+    :class:`SqliteTokenStore`. Transitions are compare-and-set UPDATEs
+    (prior status in the WHERE clause), so a lost race — including a job
+    deleted mid-parse — matches zero rows and reports ``False`` instead of
+    resurrecting or overwriting anything.
+    """
+
+    def __init__(self, db_path: Path) -> None:
+        """Open (creating if necessary) the job database.
+
+        Args:
+            db_path: SQLite file location; parent directories are created.
+        """
+        self._db_path = db_path
+        _ensure_schema(db_path)
+
+    def add(self, job: Job) -> None:
+        """Persist a new job.
+
+        Args:
+            job: The job record to store; ``id`` must be unique.
+
+        Raises:
+            sqlite3.IntegrityError: Duplicate id (astronomically rare with
+                generated values — see docs/adr/0002).
+        """
+        # Timestamps are normalized to UTC before serializing: newest-first
+        # ordering compares the isoformat TEXT lexicographically, which is
+        # only chronological when every stored value shares one offset.
+        # (Job rejects naive datetimes at construction.)
+        with _connect(self._db_path) as conn:
+            conn.execute(
+                f"INSERT INTO jobs ({_JOB_COLUMNS})"  # noqa: S608 - column list constant
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    job.id,
+                    job.token_id,
+                    job.output.value,
+                    job.ocr.value,
+                    job.status.value,
+                    job.failure_detail,
+                    _to_utc_iso(job.created_at),
+                    _to_utc_iso(job.started_at) if job.started_at else None,
+                    _to_utc_iso(job.finished_at) if job.finished_at else None,
+                    job.result.content if job.result else None,
+                    job.result.pages if job.result else None,
+                    job.result.duration_ms if job.result else None,
+                ),
+            )
+
+    def get(self, job_id: str, token_id: str) -> Job | None:
+        """Fetch a job owned by ``token_id``.
+
+        Args:
+            job_id: The job's id.
+            token_id: The calling token's id — the ownership scope.
+
+        Returns:
+            The job, or ``None`` for an unknown id or another token's job
+            (indistinguishable by design — docs/design.md, Ownership).
+        """
+        with _connect(self._db_path) as conn:
+            row = conn.execute(
+                f"SELECT {_JOB_COLUMNS} FROM jobs"  # noqa: S608
+                " WHERE id = ? AND token_id = ?",
+                (job_id, token_id),
+            ).fetchone()
+        return _row_to_job(row) if row is not None else None
+
+    def list_for_token(
+        self, token_id: str, *, status: JobStatus | None = None
+    ) -> list[Job]:
+        """List a token's jobs, newest first.
+
+        Args:
+            token_id: The calling token's id.
+            status: If given, only jobs currently in this state.
+
+        Returns:
+            The token's matching jobs, ``created_at`` descending (id as a
+            deterministic tiebreak); never another token's.
+        """
+        query = f"SELECT {_JOB_COLUMNS} FROM jobs WHERE token_id = ?"  # noqa: S608
+        params: list[str] = [token_id]
+        if status is not None:
+            query += " AND status = ?"
+            params.append(status.value)
+        query += " ORDER BY created_at DESC, id DESC"
+        with _connect(self._db_path) as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [_row_to_job(row) for row in rows]
+
+    def mark_running(self, job_id: str) -> bool:
+        """Transition ``queued`` → ``running``, stamping ``started_at``.
+
+        Args:
+            job_id: The job's id.
+
+        Returns:
+            ``True`` if the transition applied; ``False`` for a missing
+            job or any other prior status.
+        """
+        with _connect(self._db_path) as conn:
+            cursor = conn.execute(
+                "UPDATE jobs SET status = ?, started_at = ?"
+                " WHERE id = ? AND status = ?",
+                (
+                    JobStatus.RUNNING.value,
+                    datetime.now(tz=UTC).isoformat(),
+                    job_id,
+                    JobStatus.QUEUED.value,
+                ),
+            )
+            return cursor.rowcount > 0
+
+    def mark_done(self, job_id: str, result: ParsedDocument) -> bool:
+        """Transition ``running`` → ``done``, storing the result inline.
+
+        Args:
+            job_id: The job's id.
+            result: The parse result; stamped with ``finished_at``.
+
+        Returns:
+            ``True`` if the transition applied; ``False`` for a missing
+            job (e.g. cancelled mid-parse) or any other prior status — the
+            caller should then discard ``result``.
+        """
+        with _connect(self._db_path) as conn:
+            cursor = conn.execute(
+                "UPDATE jobs SET status = ?, finished_at = ?,"
+                " result_content = ?, result_pages = ?, result_duration_ms = ?"
+                " WHERE id = ? AND status = ?",
+                (
+                    JobStatus.DONE.value,
+                    datetime.now(tz=UTC).isoformat(),
+                    result.content,
+                    result.pages,
+                    result.duration_ms,
+                    job_id,
+                    JobStatus.RUNNING.value,
+                ),
+            )
+            return cursor.rowcount > 0
+
+    def mark_failed(self, job_id: str, detail: str) -> bool:
+        """Transition ``queued``/``running`` → ``failed``.
+
+        Queued jobs can fail directly (the pool rejected the submission);
+        a ``done`` job's result is never clobbered.
+
+        Args:
+            job_id: The job's id.
+            detail: Human-readable failure reason (e.g. ``"timeout"``).
+
+        Returns:
+            ``True`` if the transition applied; ``False`` for a missing
+            job or a terminal prior status.
+        """
+        with _connect(self._db_path) as conn:
+            cursor = conn.execute(
+                "UPDATE jobs SET status = ?, finished_at = ?, failure_detail = ?"
+                " WHERE id = ? AND status IN (?, ?)",
+                (
+                    JobStatus.FAILED.value,
+                    datetime.now(tz=UTC).isoformat(),
+                    detail,
+                    job_id,
+                    JobStatus.QUEUED.value,
+                    JobStatus.RUNNING.value,
+                ),
+            )
+            return cursor.rowcount > 0
+
+    def delete(self, job_id: str, token_id: str) -> bool:
+        """Delete a job owned by ``token_id``, removing its stored result.
+
+        Args:
+            job_id: The job's id.
+            token_id: The calling token's id — the ownership scope.
+
+        Returns:
+            ``True`` if a job was deleted; ``False`` for an unknown id or
+            another token's job (indistinguishable by design).
+        """
+        with _connect(self._db_path) as conn:
+            cursor = conn.execute(
+                "DELETE FROM jobs WHERE id = ? AND token_id = ?",
+                (job_id, token_id),
+            )
             return cursor.rowcount > 0

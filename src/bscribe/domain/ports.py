@@ -7,7 +7,14 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from bscribe.domain.models import OcrMode, OutputFormat, ParsedDocument, Token
+    from bscribe.domain.models import (
+        Job,
+        JobStatus,
+        OcrMode,
+        OutputFormat,
+        ParsedDocument,
+        Token,
+    )
 
 
 @runtime_checkable
@@ -37,6 +44,135 @@ class ParserPort(Protocol):
                 document (corrupt, encrypted, or otherwise unreadable).
             FileNotFoundError: ``path`` does not exist (caller bug, not a
                 document problem).
+        """
+        ...
+
+
+@runtime_checkable
+class JobStorePort(Protocol):
+    """Persists async conversion jobs (docs/design.md — Interfaces, M2).
+
+    Deliberately synchronous, like :class:`TokenStorePort`: implementations
+    back onto fast local storage and are called from code running on the
+    threadpool, never on the event loop (docs/adr/0002). Workers never see
+    this port — the FastAPI parent owns all job state.
+
+    Two contracts every implementation must honor:
+
+    * **Token scoping.** ``get``, ``list_for_token`` and ``delete`` are
+      scoped to the owning token; a wrong ``token_id`` behaves exactly like
+      a missing job (``None``/``False``), so job existence never leaks
+      across tokens (the indistinguishable-404 rule).
+    * **Guarded transitions.** The ``mark_*`` methods are compare-and-set:
+      they apply only from the expected prior status and report ``False``
+      otherwise — a late transition after a delete or a competing
+      transition must be a no-op, never an upsert or an overwrite.
+    """
+
+    def add(self, job: Job) -> None:
+        """Persist a new job.
+
+        Args:
+            job: The job record to store; ``id`` must be unique.
+        """
+        ...
+
+    def get(self, job_id: str, token_id: str) -> Job | None:
+        """Fetch a job owned by ``token_id``.
+
+        Args:
+            job_id: The job's id.
+            token_id: The calling token's id — the ownership scope.
+
+        Returns:
+            The job, or ``None`` for an unknown id *or* a job owned by a
+            different token (indistinguishable by design).
+        """
+        ...
+
+    def list_for_token(
+        self, token_id: str, *, status: JobStatus | None = None
+    ) -> list[Job]:
+        """List a token's jobs, newest first.
+
+        Ordering is ``created_at`` descending with ``id`` descending as a
+        deterministic tiebreak — part of the contract, so callers can rely
+        on a stable order across implementations.
+
+        Args:
+            token_id: The calling token's id.
+            status: If given, only jobs currently in this state.
+
+        Returns:
+            The token's matching jobs; never another token's.
+        """
+        ...
+
+    def mark_running(self, job_id: str) -> bool:
+        """Transition ``queued`` → ``running``, stamping ``started_at``.
+
+        Args:
+            job_id: The job's id.
+
+        Returns:
+            ``True`` if the transition applied; ``False`` for a missing
+            job or any other prior status.
+        """
+        ...
+
+    def mark_done(self, job_id: str, result: ParsedDocument) -> bool:
+        """Transition ``running`` → ``done``, storing the result.
+
+        Stamps ``finished_at``.
+
+        Args:
+            job_id: The job's id.
+            result: The parse result to store inline.
+
+        Returns:
+            ``True`` if the transition applied; ``False`` for a missing
+            job (e.g. cancelled mid-parse) or any other prior status —
+            the caller should then discard ``result``.
+        """
+        ...
+
+    def mark_failed(self, job_id: str, detail: str) -> bool:
+        """Transition ``queued``/``running`` → ``failed``.
+
+        Stamps ``finished_at``. Queued jobs can fail directly (e.g. the
+        pool rejects the submission); a ``done`` job's result is never
+        clobbered.
+
+        Args:
+            job_id: The job's id.
+            detail: Human-readable failure reason (e.g. ``"timeout"``).
+                Stored and later surfaced to callers via the job endpoints,
+                so it must never carry document content — in particular,
+                never pass a parser exception message here: liteparse's
+                ``ParseError`` may quote document internals (see
+                docs/design.md — Privacy, and CLAUDE.md's liteparse notes).
+
+        Returns:
+            ``True`` if the transition applied; ``False`` for a missing
+            job or a terminal prior status.
+        """
+        ...
+
+    def delete(self, job_id: str, token_id: str) -> bool:
+        """Delete a job owned by ``token_id``, removing its stored result.
+
+        Removal is logical: an implementation need not scrub freed storage
+        (SQLite keeps deleted pages until checkpoint/vacuum). At-rest
+        protection of the underlying volume is the operator's
+        responsibility (docs/design.md — Security).
+
+        Args:
+            job_id: The job's id.
+            token_id: The calling token's id — the ownership scope.
+
+        Returns:
+            ``True`` if a job was deleted; ``False`` for an unknown id or
+            another token's job (indistinguishable by design).
         """
         ...
 

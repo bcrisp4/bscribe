@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import structlog
 from fastapi import FastAPI, Request, Response
 
-from bscribe.adapters.sqlite import SqliteTokenStore
+from bscribe.adapters.sqlite import SqliteJobStore, SqliteTokenStore
 from bscribe.api import v1_router
 from bscribe.errors import (
     UPLOAD_TOO_LARGE_DETAIL,
@@ -73,6 +73,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # if missing, and tests can swap in a fake before serving a request.
     # Auth reads it per request via bscribe.auth.require_token.
     app.state.token_store = SqliteTokenStore(settings.db_path)
+    # Same rationale; #17's job endpoints read it per request.
+    app.state.job_store = SqliteJobStore(settings.db_path)
     # Ensure the upload scratch dir exists once here rather than on every
     # request. The M2 startup sweep (docs/design.md — Startup sweep) will also
     # wipe it; until then per-request cleanup (see api.convert) is the story.

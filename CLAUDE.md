@@ -10,7 +10,7 @@ bscribe = self-hosted HTTP service. Converts documents (PDF, office formats, ima
 
 Designs/specs committed under `docs/`. Implementation plans **never** committed — `docs/superpowers/plans/` gitignored on purpose, no force-add.
 
-Status: bootstrapping. Only `GET /healthz` exists. Conversion API arrives milestone M1 (milestones in design doc).
+Status: M1 shipped (v0.1.0 — sync `/v1/convert`, bearer auth, CLI, hardened multi-arch container). M2 (async jobs) in progress — `gh issue list --milestone "M2 — async jobs"` for current state.
 
 ## Work tracking
 

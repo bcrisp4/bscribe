@@ -10,7 +10,9 @@ import pytest
 import structlog
 from httpx import ASGITransport
 
+from bscribe.adapters.sqlite import SqliteJobStore
 from bscribe.app import create_app
+from bscribe.domain.ports import JobStorePort
 from bscribe.settings import Settings
 from bscribe.workers import WorkerPool
 
@@ -55,6 +57,14 @@ async def test_default_settings_built_from_env(
     app = create_app()
 
     assert app.state.settings.worker_count == 7
+
+
+async def test_job_store_built_at_factory_time() -> None:
+    """The job store is on app.state before any request is served."""
+    app = create_app()
+
+    assert isinstance(app.state.job_store, SqliteJobStore)
+    assert isinstance(app.state.job_store, JobStorePort)
 
 
 async def test_unknown_path_returns_problem_json() -> None:

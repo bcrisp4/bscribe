@@ -29,7 +29,7 @@ class TestGenerateSecret:
 
 class TestHashSecret:
     def test_hash_is_sha256_hexdigest_of_full_string(self) -> None:
-        secret = "bscribe_example"  # noqa: S105 - not a real credential
+        secret = "bscribe_example"
         expected = hashlib.sha256(secret.encode()).hexdigest()
         assert hash_secret(secret) == expected
 
