@@ -52,8 +52,15 @@ async def convert(
     # preserved (liteparse dispatches on it); the caller's filename never
     # lands in the on-disk path.
     dest = settings.scratch_dir / f"{uuid4().hex}{ext}"
-    # Filename only at DEBUG (Privacy); the token label attributes the request.
-    logger.debug("convert_upload", filename=file.filename, token_id=token.id)
+    # Filename only at DEBUG (Privacy). The token id + label attribute the
+    # request (design.md — Security: label attributes requests); never the
+    # secret, which the Token model does not carry.
+    logger.debug(
+        "convert_upload",
+        filename=file.filename,
+        token_id=token.id,
+        token_label=token.label,
+    )
     try:
         await spool_upload(file, dest=dest, max_bytes=settings.max_upload_bytes)
         result = await pool.parse(dest, output=output, ocr=ocr)
