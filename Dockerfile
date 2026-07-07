@@ -30,12 +30,63 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # line up across stages; the uv builder image is bookworm-based.
 FROM python:3.14-slim-bookworm AS runtime
 
+# Conversion binaries liteparse shells out to from PATH (verified in the
+# liteparse crate `conversion.rs`): ImageMagick for image->PDF, LibreOffice for
+# office->PDF. librsvg2-bin provides `rsvg-convert`, ImageMagick 6's SVG decode
+# delegate on Debian — without it SVG uploads fail to render; librsvg is also the
+# SAFE renderer (it ignores remote/file refs by default, unlike ImageMagick's
+# internal MSVG/MVG path). Ghostscript stays because liteparse *gates* SVG/EPS/PS
+# inputs on a `gs` binary being present (conversion.rs GHOSTSCRIPT_REQUIRED_...)
+# even though the actual SVG render goes through rsvg here. PDFium and Tesseract
+# are bundled in the liteparse wheel — never apt-installed. LibreOffice is the
+# component subset (no full metapackage, no Java): writer/calc/impress/draw
+# cover doc/docx, xls/xlsx/csv, ppt/pptx, odf, rtf. --no-install-recommends
+# keeps the image near the low end of the design's accepted ~400MB-1GB cost.
+# bookworm ships ImageMagick 6, so the policy path is /etc/ImageMagick-6.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        imagemagick \
+        ghostscript \
+        librsvg2-bin \
+        libreoffice-core \
+        libreoffice-writer \
+        libreoffice-calc \
+        libreoffice-impress \
+        libreoffice-draw
+
+# Restrictive ImageMagick policy: ImageMagick is fed untrusted documents, and
+# its SVG/MVG/MSL handling is the ImageTragick attack surface (outbound fetches,
+# local file reads) that container hardening alone does not stop on the tailnet.
+# This REPLACES Debian's stock policy, which disables PDF/PS — we need PDF write
+# for image->PDF output and PS/EPS for the Ghostscript path (see the file's comment).
+COPY docker/policy.xml /etc/ImageMagick-6/policy.xml
+
 RUN groupadd --system bscribe \
     && useradd --system --gid bscribe --home-dir /app --no-create-home bscribe
 
 WORKDIR /app
 # --no-editable installs bscribe into the venv, so only the venv is needed.
 COPY --from=builder --chown=bscribe:bscribe /app/.venv /app/.venv
+
+# liteparse's bundled OCR (the tesseract-rs crate) is NOT self-contained: on the
+# first OCR it DOWNLOADS eng.traineddata (tessdata_best, ~15MB) from GitHub and
+# caches it under $HOME/.tesseract-rs/tessdata. That breaks us three ways — a
+# runtime network dependency; the hardened read-only root filesystem at runtime
+# (nowhere to write the cache); and the non-root service user, which cannot
+# write to its root-owned home even on a writable rootfs. So we bake the exact
+# file it fetches at build time (network available here) into the service user's
+# cache, owned by bscribe and read at runtime — no download, no runtime write.
+# HOME is pinned so tesseract-rs resolves the same path the download path uses.
+# Pinned to a tessdata_best commit + sha256 so the fetch is reproducible; a
+# changed upstream file fails the build loudly rather than shifting silently.
+ENV HOME=/app
+ADD --chown=bscribe:bscribe \
+    --checksum=sha256:8280aed0782fe27257a68ea10fe7ef324ca0f8d85bd2fd145d1c2b560bcb66ba \
+    https://github.com/tesseract-ocr/tessdata_best/raw/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/eng.traineddata \
+    /app/.tesseract-rs/tessdata/eng.traineddata
 
 # /data holds the SQLite database (tokens now, jobs from M2). /app stays
 # root-owned (read-only for the service user), so the default db_path must

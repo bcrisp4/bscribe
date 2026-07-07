@@ -54,6 +54,13 @@ section is renamed to the new version and becomes the GitHub Release notes.
   uvicorn flag surface (`--proxy-headers`, `--root-path`, …) remains
   available. Setting `BSCRIBE_PORT` moves the server and the container health
   probe together.
+- The container image now bundles the full conversion toolchain (ImageMagick,
+  LibreOffice, Ghostscript, librsvg), so image, SVG, and office-document
+  conversion work in the shipped image rather than only in a dev checkout. OCR
+  language data is baked in at build time, so scanned-document OCR runs fully
+  offline — a conversion never makes an outbound request.
+- Deployment guide ([docs/deployment.md](docs/deployment.md)) with the hardened
+  run recipe and a note that a writable `/tmp` (tmpfs) is required.
 
 ### Fixed
 
@@ -62,5 +69,15 @@ section is renamed to the new version and becomes the GitHub Release notes.
 - Container builds no longer reuse a stale cached wheel when only source files
   changed (the image build now forces the project wheel to rebuild with
   `uv sync --reinstall-package bscribe`).
+
+### Security
+
+- The container is hardened for a locked-down runtime: it runs as a non-root
+  user with a read-only root filesystem, all Linux capabilities dropped, and no
+  privilege escalation — the only writable surface is a tmpfs scratch and the
+  `/data` volume. A restrictive ImageMagick policy ships in the image, and SVGs
+  render through librsvg, which does not fetch remote resources — closing the
+  outbound-fetch and local-file-read (ImageTragick) surface that untrusted
+  documents could otherwise reach. See [docs/deployment.md](docs/deployment.md).
 
 [Unreleased]: https://github.com/bcrisp4/bscribe/commits/main
