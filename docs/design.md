@@ -238,9 +238,9 @@ Deliberately loose — one user, retry-friendly callers, zero revenue impact. Th
 | Availability | Best effort; unavailable for a day = fine. Callers retry | No HA, no replicas, single container, restart-on-failure is the whole story |
 | Callers | 1–3 internal services + occasional curl | A handful of long-lived bearer tokens, one per caller; no rate limiting; no quotas |
 | Concurrent jobs | 4 (configurable; matches Pi 5 core count) | Worker pool default 4; SQLite uncontended at this scale |
-| Sync latency (born-digital only) | p95 < 5s for a clean 10-page born-digital PDF on Pi 5. Measured 2026-07-05 on the target Pi 5 (stock arm64 container): ~10ms/page born-digital, ~1.1s/page through bundled Tesseract OCR — ~50× headroom for the target class. Re-measure under the hardened container in M1 | Violation = bug tripwire, not tuning signal; no perf work planned |
+| Sync latency (born-digital only) | p95 < 5s for a clean 10-page born-digital PDF on Pi 5. Confirmed under the hardened v0.1.0 container on the target Pi 5 (2026-07-07): **9–11 ms/page** born-digital, unchanged from the pre-hardening baseline — ~50× headroom for the target class. Full method and figures in Appendix A | Violation = bug tripwire, not tuning signal; no perf work planned |
 | Sync latency (OCR path) | No target. OCR is ~1.1s/page (Tesseract, measured), so a scanned 10-pager takes ~11s synchronously — permitted (well inside the per-job timeout; caller owns HTTP/proxy timeout risk) but the async path is the intended route for scanned documents | Sync stays limit-free; docs/README steer OCR-heavy workloads to `/v1/jobs` |
-| Sync latency (office docs) | No target. Each conversion spawns a fresh LibreOffice process — expect seconds of overhead per document, plus a memory spike (possibly hundreds of MB for large spreadsheets). Unmeasured; measure in M1 | Worker-pool bound (default 4) also caps concurrent soffice processes, protecting the Pi's shared RAM |
+| Sync latency (office docs) | No target. Each conversion spawns a fresh LibreOffice process. Measured on the Pi 5 (2026-07-07, hardened v0.1.0): **~2.1 s/page** (6.4 s for a 3-page `.doc`, LibreOffice spin-up dominating), and container RSS peaking at **~1.14 GB** under 4 concurrent office conversions from a ~324 MB idle — no OOM under a 2 GB cap. Details in Appendix A | Worker-pool bound (default 4) also caps concurrent soffice processes, protecting the Pi's shared RAM; size the container `--memory` cap above the expected peak |
 | Async throughput | No deadline. A job is done when it's done; CPU VLM OCR at ~0.1 pages/s later is acceptable | No queue tuning, no priorities, no job SLAs |
 | Data loss | Losing all queued jobs/results = shrug; callers resubmit | Job persistence is convenience, not a durability promise; no backups of bscribe state |
 
@@ -291,7 +291,7 @@ Instrumentation via `prometheus-client` + FastAPI middleware. Alerting stays in 
 
 Ordered by ROI: each demoable, value before scaffolding.
 
-**M1 — sync converter.** `POST /v1/convert` (markdown/text out, `ocr=auto|off` via liteparse's built-in Tesseract), all input formats (PDF, images, office docs — container ships ImageMagick + LibreOffice + librsvg + Ghostscript, with OCR language data baked in for offline OCR), bearer token auth backed by the SQLite token table, the `bscribe` CLI (`serve`, `healthcheck`, `token add/list/delete`), `/healthz`, multi-arch container image built on native runners, restrictive ImageMagick `policy.xml` + librsvg SVG rendering (see Security), worker process pool (default 4, configurable) with per-job timeout. No job store yet — SQLite carries only tokens in M1. Demo: convert a real bank-statement scan and a `.docx` from curl on the tailnet. Measure office-conversion overhead on the Pi (unmeasured — see SLOs).
+**M1 — sync converter.** `POST /v1/convert` (markdown/text out, `ocr=auto|off` via liteparse's built-in Tesseract), all input formats (PDF, images, office docs — container ships ImageMagick + LibreOffice + librsvg + Ghostscript, with OCR language data baked in for offline OCR), bearer token auth backed by the SQLite token table, the `bscribe` CLI (`serve`, `healthcheck`, `token add/list/delete`), `/healthz`, multi-arch container image built on native runners, restrictive ImageMagick `policy.xml` + librsvg SVG rendering (see Security), worker process pool (default 4, configurable) with per-job timeout. No job store yet — SQLite carries only tokens in M1. Demo: convert a real bank-statement scan and a `.docx` from curl on the tailnet. Office-conversion overhead and the LibreOffice memory spike were measured on the Pi 5 under the hardened v0.1.0 image (see SLOs and Appendix A).
 
 **M2 — async jobs.** SQLite job store, all `/v1/jobs` endpoints including list and cancellation of running jobs, TTL purge. Demo: submit a 100-page PDF, poll, fetch the result, watch it purge.
 
@@ -331,3 +331,64 @@ Backlog (unordered, from Missing features): web UI, webhooks if polling ever ann
 ## Licensing
 
 MIT. No commercial ambitions, zero-friction sharing; liteparse (Apache-2.0) is compatible as a dependency.
+
+## Appendix A — M1 performance measurements (Pi 5, hardened v0.1.0)
+
+Closes the SLO-table measurements deferred through M1. All figures were taken
+on the target hardware running the **published `v0.1.0` container**, under the
+full hardened runtime contract from [deployment.md](deployment.md) — not a dev
+checkout — on **2026-07-07**.
+
+### Test environment
+
+| | |
+|---|---|
+| Host | Raspberry Pi 5 Model B Rev 1.1 |
+| CPU / RAM | 4× Cortex-A76 (aarch64), 15 GiB |
+| OS / kernel | Debian GNU/Linux 13 (trixie), `6.12.75+rpt-rpi-2712 aarch64` |
+| Container engine | podman 5.4.2, **rootless**, netavark backend |
+| Image | `ghcr.io/bcrisp4/bscribe:0.1.0` (arm64, digest `sha256:caa4a41c40bc573719c8e6a3f54adb34b742e328731128a674d6f307e383de56`) |
+| Run flags | `--read-only --tmpfs /tmp --cap-drop=ALL --security-opt=no-new-privileges --memory=2g -v <vol>:/data -p 8000:8000` |
+
+### Pipeline component versions (inside the image)
+
+| Component | Version |
+|---|---|
+| bscribe | 0.1.0 |
+| liteparse | 2.4.0 |
+| Python | 3.14.6 |
+| Base image | `python:3.14-slim-bookworm` (Debian 12 bookworm) |
+| ImageMagick | 6.9.11-60 Q16 |
+| Ghostscript | 10.00.0 |
+| librsvg (`rsvg-convert`) | 2.54.7 |
+| LibreOffice (`soffice`) | 7.4.7.2 |
+| Tesseract OCR data | `tessdata_best` `eng.traineddata`, pinned to commit `e12c65a915945e4c28e237a9b52bc4a8f39a0cec` (sha256 `8280aed0782fe27257a68ea10fe7ef324ca0f8d85bd2fd145d1c2b560bcb66ba`), baked at build |
+| PDFium, Tesseract engine | bundled in the liteparse 2.4.0 wheel |
+
+Test documents were the liteparse `integration_tests_data` fixtures plus the
+repo's `tests/integration/data/sample.pdf`: a born-digital PDF, a 3-page `.doc`,
+and a scanned receipt PNG. Latencies are read from each response's
+`metadata.duration_ms` / `metadata.pages`.
+
+### Results
+
+| Scenario | Input | Result | Notes |
+|---|---|---|---|
+| Born-digital latency | born-digital PDF | **9–11 ms/page** (warm) | Holds the p95 < 5s / ~10 ms/page SLO; unchanged from the pre-hardening 2026-07-05 baseline, so container hardening adds no measurable parse overhead. |
+| Office conversion | 3-page `.doc` | **6.4 s total ≈ 2.1 s/page** | First-parse cost is dominated by the fresh LibreOffice `soffice` spin-up per conversion; the design steers OCR-heavy/large work to the async path (M2). |
+| OCR (scanned image) | receipt PNG | **659 ms**, fully **offline** | Baked `eng.traineddata` — the container ran with no outbound network available and OCR still succeeded, confirming the build-time bake removes the runtime tessdata download. |
+| LibreOffice memory spike | 4× concurrent `.doc` | idle **~324 MB → peak ~1141 MB**; **no OOM** under `--memory=2g` | ~200 MB per concurrent `soffice` over baseline. The worker-pool bound (default 4) caps concurrent conversions; size `--memory` above the expected peak — a large spreadsheet can spike higher. |
+
+### Operational confirmations
+
+- The image runs **rootless** under podman with a **read-only root filesystem**,
+  all capabilities dropped, and `no-new-privileges`; `/healthz` reports healthy
+  and `bscribe healthcheck` (the container `HEALTHCHECK`) passes from inside.
+- Born-digital, image/OCR, and office paths all convert end-to-end under that
+  hardened, offline runtime — no root, no writable root filesystem, no network.
+
+> Note: `sample.pdf` is a single page, so the born-digital per-page figure is a
+> per-page rate rather than a 10-page p95; the 2026-07-05 baseline established
+> the 10-page behaviour and this run confirms the per-page rate is unchanged
+> under hardening. A `pipeline_fingerprint` / `GET /v1/info` (M3) will let these
+> component versions be read from a running instance rather than recorded by hand.
