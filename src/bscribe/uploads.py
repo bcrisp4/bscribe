@@ -1,16 +1,19 @@
-"""Streaming upload staging with a hard size cap.
+"""Streaming upload staging with a size cap on the scratch copy.
 
 Copies a multipart upload to a scratch file in bounded-memory chunks and
-enforces the global upload limit as it writes. This streaming byte count is
-the authoritative size guard (the Content-Length prefilter in
-``bscribe.app`` is only an advisory pre-receipt reject — headers are absent
-or spoofable). On overflow the partial file is left for the caller's
-cleanup (the endpoint unlinks the scratch file in a ``finally``).
+enforces the global upload limit as it writes. Caveat: FastAPI/Starlette has
+already received and spooled the whole multipart body (to its own temp file)
+before this runs, so this counter bounds the scratch *copy*, not what is
+received — it is the last line, backing up the best-effort Content-Length
+prefilter in ``bscribe.app``. Neither guard bounds a chunked or
+absent-Content-Length body's receipt; accepted at single-user tailnet scale
+(docs/design.md — max upload size). On overflow the partial file is left for
+the caller's cleanup (the endpoint unlinks the scratch file in a ``finally``).
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -23,6 +26,7 @@ class UploadTooLargeError(Exception):
     """The upload exceeded the configured limit; maps to 413."""
 
 
+@runtime_checkable
 class AsyncChunkReader(Protocol):
     """The slice of Starlette's ``UploadFile`` that ``spool_upload`` needs."""
 

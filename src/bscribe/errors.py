@@ -35,6 +35,11 @@ if TYPE_CHECKING:
 
 PROBLEM_JSON_MEDIA_TYPE = "application/problem+json"
 
+# Shared so the exception handler and the app's Content-Length prefilter
+# (which runs outside ExceptionMiddleware and cannot raise the exception)
+# emit an identical 413 body instead of two copy-pasted literals.
+UPLOAD_TOO_LARGE_DETAIL = "upload exceeds maximum size"
+
 logger = structlog.get_logger()
 
 # Domain/ingestion exceptions raised on the sync convert path, mapped to the
@@ -44,7 +49,7 @@ logger = structlog.get_logger()
 # the job runner, so these handlers only ever fire on the sync path.
 _DOMAIN_ERROR_STATUS: dict[type[Exception], tuple[int, str]] = {
     UnsupportedFormatError: (415, "unsupported input format"),
-    UploadTooLargeError: (413, "upload exceeds maximum size"),
+    UploadTooLargeError: (413, UPLOAD_TOO_LARGE_DETAIL),
     DocumentUnparseableError: (422, "document could not be parsed"),
     JobTimeoutError: (500, "timeout"),
     WorkerCrashedError: (500, "Internal server error"),
@@ -114,8 +119,19 @@ async def _handle_validation_error(request: Request, exc: Exception) -> Response
 
 async def _handle_domain_error(request: Request, exc: Exception) -> Response:
     del request
-    status, detail = _DOMAIN_ERROR_STATUS[type(exc)]
-    return problem_response(status=status, detail=detail)
+    # Starlette dispatches by MRO, so a subclass of a mapped error reaches
+    # this handler too; walk the MRO rather than exact-matching type(exc),
+    # which would KeyError (→ generic 500) on any future subclass.
+    for cls in type(exc).__mro__:
+        mapping = _DOMAIN_ERROR_STATUS.get(cls)
+        if mapping is not None:
+            status, detail = mapping
+            return problem_response(status=status, detail=detail)
+    # Unreachable via normal registration (only mapped types are registered);
+    # defensive so a mis-registration degrades to 500, not an unhandled error.
+    return problem_response(  # pragma: no cover
+        status=500, detail="Internal server error"
+    )
 
 
 async def _handle_unexpected_error(request: Request, exc: Exception) -> Response:

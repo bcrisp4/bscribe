@@ -11,7 +11,11 @@ from fastapi import FastAPI, Request, Response
 
 from bscribe.adapters.sqlite import SqliteTokenStore
 from bscribe.api import v1_router
-from bscribe.errors import problem_response, register_error_handlers
+from bscribe.errors import (
+    UPLOAD_TOO_LARGE_DETAIL,
+    problem_response,
+    register_error_handlers,
+)
 from bscribe.log import configure_logging
 from bscribe.settings import Settings
 from bscribe.workers import WorkerPool
@@ -69,6 +73,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # if missing, and tests can swap in a fake before serving a request.
     # Auth reads it per request via bscribe.auth.require_token.
     app.state.token_store = SqliteTokenStore(settings.db_path)
+    # Ensure the upload scratch dir exists once here rather than on every
+    # request. The M2 startup sweep (docs/design.md — Startup sweep) will also
+    # wipe it; until then per-request cleanup (see api.convert) is the story.
+    settings.scratch_dir.mkdir(parents=True, exist_ok=True)
     register_error_handlers(app)
 
     max_body_bytes = settings.max_upload_bytes + MULTIPART_OVERHEAD_SLACK
@@ -77,11 +85,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def reject_oversized_body(  # pyright: ignore[reportUnusedFunction]
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
-        """Advisory pre-receipt guard: 413 when the declared body is huge.
+        """Pre-receipt 413 when an *honest* Content-Length exceeds the cap.
 
-        Content-Length is absent or spoofable, so this only short-circuits
-        obviously-oversized uploads; spool_upload's streaming counter is the
-        authoritative size limit (see docs/design.md — max upload size)."""
+        This runs before routing and therefore before auth, so an oversized
+        unauthenticated upload is rejected here (413) rather than reaching the
+        401 check — a deliberate don't-buffer-a-huge-body tradeoff. It only
+        catches requests that declare an honest, oversized Content-Length;
+        chunked or absent/spoofed headers slip past and are bounded (best
+        effort at single-user scale) by spool_upload's copy-time counter (see
+        docs/design.md — max upload size)."""
         declared = request.headers.get("content-length")
         too_big = (
             declared is not None
@@ -89,7 +101,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             and int(declared) > max_body_bytes
         )
         if too_big:
-            return problem_response(status=413, detail="upload exceeds maximum size")
+            return problem_response(status=413, detail=UPLOAD_TOO_LARGE_DETAIL)
         return await call_next(request)
 
     # pyright strict flags decorator-registered nested handlers as unused

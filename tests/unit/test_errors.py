@@ -152,6 +152,13 @@ class TestDomainErrorHandlers:
         def _unparseable() -> None:  # pyright: ignore[reportUnusedFunction]
             raise DocumentUnparseableError("secret-doc-internals")
 
+        @app.get("/unparseable-subclass")
+        def _unparseable_subclass() -> None:  # pyright: ignore[reportUnusedFunction]
+            class EncryptedPdfError(DocumentUnparseableError):
+                pass
+
+            raise EncryptedPdfError("secret-doc-internals")
+
         @app.get("/timeout")
         def _timeout() -> None:  # pyright: ignore[reportUnusedFunction]
             raise JobTimeoutError("secret-doc-internals")
@@ -181,6 +188,14 @@ class TestDomainErrorHandlers:
         assert response.status_code == 422
         assert response.json()["detail"] == "document could not be parsed"
         assert "secret-doc-internals" not in response.text
+
+    async def test_subclass_of_domain_error_maps_via_mro(self) -> None:
+        # Starlette routes a subclass to the base handler by MRO; the handler
+        # must resolve it to the base's status, not KeyError into a 500.
+        async with make_client(self.make_app()) as client:
+            response = await client.get("/unparseable-subclass")
+        assert response.status_code == 422
+        assert response.json()["detail"] == "document could not be parsed"
 
     async def test_timeout_is_500_with_timeout_detail(self) -> None:
         async with make_client(self.make_app()) as client:

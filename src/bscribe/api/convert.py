@@ -3,8 +3,12 @@
 Stages the multipart upload to the scratch dir, dispatches it to the warm
 worker pool, and returns the extracted text inline. The upload is deleted
 as soon as parsing finishes, success or failure (docs/design.md — Data
-retention). Validation order is 401 → 400 → 415 → 413 → 422/500; each maps
-to the status-code contract via the handlers in ``bscribe.errors``.
+retention). Once past the app's Content-Length prefilter (which may return
+413 before this handler, and before auth, on an oversized declared body),
+this handler applies 401 → 400 → 415 → 413 (copy-time cap) → 422/500, each
+mapped to the status-code contract by the handlers in ``bscribe.errors``.
+Note FastAPI has already received and spooled the body by the time these
+checks run, so they gate processing, not receipt.
 """
 
 from __future__ import annotations
@@ -41,12 +45,12 @@ async def convert(
     settings = request.app.state.settings
     pool = request.app.state.worker_pool
 
-    # 415 before any disk work: liteparse routes by extension, so an
+    # 415 before staging to scratch: liteparse routes by extension, so an
     # unsupported one would otherwise surface as a generic parse failure.
     ext = supported_extension(file.filename)
-    settings.scratch_dir.mkdir(parents=True, exist_ok=True)
-    # Random name, extension preserved (liteparse dispatches on it); the
-    # caller's filename never lands in the on-disk path.
+    # scratch_dir is created once in create_app. Random name, extension
+    # preserved (liteparse dispatches on it); the caller's filename never
+    # lands in the on-disk path.
     dest = settings.scratch_dir / f"{uuid4().hex}{ext}"
     # Filename only at DEBUG (Privacy); the token label attributes the request.
     logger.debug("convert_upload", filename=file.filename, token_id=token.id)
