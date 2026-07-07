@@ -5,7 +5,8 @@ from __future__ import annotations
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from contextlib import closing
+from datetime import UTC, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 import pytest
@@ -194,7 +195,9 @@ class TestSqliteTokenStore:
 
 class TestSqliteJobStore:
     def test_satisfies_job_store_port(self, tmp_path: Path) -> None:
-        store = SqliteJobStore(tmp_path / "jobs.db")
+        # Typed assignment: pyright verifies full structural conformance
+        # (signatures, not just method names like the isinstance check).
+        store: JobStorePort = SqliteJobStore(tmp_path / "jobs.db")
         assert isinstance(store, JobStorePort)
 
     def test_add_then_get_roundtrip(self, tmp_path: Path) -> None:
@@ -202,6 +205,57 @@ class TestSqliteJobStore:
         job = make_job()
         store.add(job)
         assert store.get(job.id, job.token_id) == job
+
+    def test_add_then_get_roundtrip_of_populated_done_snapshot(
+        self, tmp_path: Path
+    ) -> None:
+        """Every column, not just the fresh-queued subset, must roundtrip."""
+        store = SqliteJobStore(tmp_path / "jobs.db")
+        job = make_job(
+            status=JobStatus.DONE,
+            started_at=datetime(2026, 7, 7, 12, 1, tzinfo=UTC),
+            finished_at=datetime(2026, 7, 7, 12, 2, tzinfo=UTC),
+            result=make_result(content="# Full", pages=7, duration_ms=99.25),
+        )
+        store.add(job)
+        assert store.get(job.id, job.token_id) == job
+
+    def test_created_at_is_stored_normalized_to_utc(self, tmp_path: Path) -> None:
+        """Non-UTC offsets must not break the lexicographic newest-first order."""
+        store = SqliteJobStore(tmp_path / "jobs.db")
+        older_plus2 = make_job(
+            id="000000000000000a",
+            # 14:00+02:00 == 12:00Z — older, but the raw string would sort last.
+            created_at=datetime(2026, 7, 7, 14, 0, tzinfo=timezone(timedelta(hours=2))),
+        )
+        newer_utc = make_job(
+            id="000000000000000b",
+            created_at=datetime(2026, 7, 7, 12, 30, tzinfo=UTC),
+        )
+        store.add(older_plus2)
+        store.add(newer_utc)
+        listed = store.list_for_token("a1b2c3d4")
+        assert [job.id for job in listed] == [newer_utc.id, older_plus2.id]
+        # Roundtrip preserves the instant (datetime equality is offset-aware).
+        assert listed[1].created_at == older_plus2.created_at
+
+    def test_get_raises_on_partially_populated_result_columns(
+        self, tmp_path: Path
+    ) -> None:
+        """A hand-edited row must fail loudly, not build a corrupt result."""
+        db = tmp_path / "jobs.db"
+        store = SqliteJobStore(db)
+        job = make_job()
+        store.add(job)
+        with closing(sqlite3.connect(db)) as conn, conn:
+            conn.execute(
+                "UPDATE jobs SET result_content = 'orphan text' WHERE id = ?",
+                (job.id,),
+            )
+        with pytest.raises(ValueError, match=job.id) as excinfo:
+            store.get(job.id, job.token_id)
+        # Privacy hard rule: the error must not quote the stored content.
+        assert "orphan text" not in str(excinfo.value)
 
     def test_get_roundtrip_preserves_utc(self, tmp_path: Path) -> None:
         store = SqliteJobStore(tmp_path / "jobs.db")
@@ -388,7 +442,9 @@ class TestSqliteJobStore:
     def test_upgrades_existing_m1_database(self, tmp_path: Path) -> None:
         """A tokens-only M1 file (user_version=1) must upgrade in place."""
         db = tmp_path / "bscribe.db"
-        with sqlite3.connect(db, autocommit=True) as conn:
+        # closing(), not the connection context manager: the latter only
+        # commits and would leave a WAL handle open under the migration.
+        with closing(sqlite3.connect(db, autocommit=True)) as conn:
             # Replica of the M1 schema as shipped (migration entry 1).
             conn.execute("PRAGMA journal_mode = WAL")
             conn.execute(
@@ -406,7 +462,6 @@ class TestSqliteJobStore:
                 ("0" * 64, datetime(2026, 7, 6, tzinfo=UTC).isoformat()),
             )
             conn.execute("PRAGMA user_version = 1")
-        conn.close()
 
         job_store = SqliteJobStore(db)
         job = make_job()

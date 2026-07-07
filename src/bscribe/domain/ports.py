@@ -93,7 +93,11 @@ class JobStorePort(Protocol):
     def list_for_token(
         self, token_id: str, *, status: JobStatus | None = None
     ) -> list[Job]:
-        """List a token's jobs, newest first (``created_at`` desc).
+        """List a token's jobs, newest first.
+
+        Ordering is ``created_at`` descending with ``id`` descending as a
+        deterministic tiebreak — part of the contract, so callers can rely
+        on a stable order across implementations.
 
         Args:
             token_id: The calling token's id.
@@ -142,6 +146,11 @@ class JobStorePort(Protocol):
         Args:
             job_id: The job's id.
             detail: Human-readable failure reason (e.g. ``"timeout"``).
+                Stored and later surfaced to callers via the job endpoints,
+                so it must never carry document content — in particular,
+                never pass a parser exception message here: liteparse's
+                ``ParseError`` may quote document internals (see
+                docs/design.md — Privacy, and CLAUDE.md's liteparse notes).
 
         Returns:
             ``True`` if the transition applied; ``False`` for a missing
@@ -150,7 +159,12 @@ class JobStorePort(Protocol):
         ...
 
     def delete(self, job_id: str, token_id: str) -> bool:
-        """Delete a job owned by ``token_id``, purging any stored result.
+        """Delete a job owned by ``token_id``, removing its stored result.
+
+        Removal is logical: an implementation need not scrub freed storage
+        (SQLite keeps deleted pages until checkpoint/vacuum). At-rest
+        protection of the underlying volume is the operator's
+        responsibility (docs/design.md — Security).
 
         Args:
             job_id: The job's id.

@@ -64,7 +64,9 @@ _MIGRATIONS: tuple[str, ...] = (
         result_duration_ms REAL
     ) STRICT
     """,
-    # Covers the one job query shape: per-token listing, newest first.
+    # Serves the one job query shape: per-token listing, newest first. The
+    # id tiebreak in that ORDER BY still needs a small temp B-tree over
+    # created_at ties (id is not the rowid) — immaterial at this scale.
     "CREATE INDEX jobs_token_created ON jobs (token_id, created_at DESC)",
 )
 
@@ -100,6 +102,7 @@ def _ensure_schema(db_path: Path) -> None:
 
 
 def _init_schema_once(db_path: Path) -> None:
+    """Run one migration attempt; raises on lock contention (see caller)."""
     # autocommit=True: journal_mode cannot change inside a transaction,
     # and the migration manages its own BEGIN IMMEDIATE explicitly.
     conn = sqlite3.connect(db_path, autocommit=True)
@@ -155,6 +158,11 @@ _JOB_COLUMNS = (
 )
 
 
+def _to_utc_iso(value: datetime) -> str:
+    """Serialize an aware datetime as UTC isoformat TEXT (sortable)."""
+    return value.astimezone(UTC).isoformat()
+
+
 def _row_to_job(
     row: tuple[
         str,
@@ -171,6 +179,15 @@ def _row_to_job(
         float | None,
     ],
 ) -> Job:
+    """Map a jobs row (in ``_JOB_COLUMNS`` order) back to a :class:`Job`.
+
+    Raises:
+        ValueError: The row violates a Job invariant — result columns
+            partially populated, or a state combination
+            :meth:`Job.__post_init__` rejects. Only reachable through
+            external edits (the operator's sanctioned debug path is raw
+            SQLite); the message carries the job id, never stored content.
+    """
     (
         job_id,
         token_id,
@@ -187,8 +204,12 @@ def _row_to_job(
     ) = row
     result = None
     if result_content is not None:
-        # done => all three result columns present (guarded by mark_done).
-        assert result_pages is not None and result_duration_ms is not None  # noqa: S101
+        # mark_done writes all three columns atomically; a partial set means
+        # the row was edited outside the store. Fail loudly — an explicit
+        # raise, not an assert, so the guard survives python -O.
+        if result_pages is None or result_duration_ms is None:
+            msg = f"job {job_id}: result columns partially populated"
+            raise ValueError(msg)
         result = ParsedDocument(
             content=result_content,
             pages=result_pages,
@@ -336,6 +357,10 @@ class SqliteJobStore:
             sqlite3.IntegrityError: Duplicate id (astronomically rare with
                 generated values — see docs/adr/0002).
         """
+        # Timestamps are normalized to UTC before serializing: newest-first
+        # ordering compares the isoformat TEXT lexicographically, which is
+        # only chronological when every stored value shares one offset.
+        # (Job rejects naive datetimes at construction.)
         with _connect(self._db_path) as conn:
             conn.execute(
                 f"INSERT INTO jobs ({_JOB_COLUMNS})"  # noqa: S608 - column list constant
@@ -347,9 +372,9 @@ class SqliteJobStore:
                     job.ocr.value,
                     job.status.value,
                     job.failure_detail,
-                    job.created_at.isoformat(),
-                    job.started_at.isoformat() if job.started_at else None,
-                    job.finished_at.isoformat() if job.finished_at else None,
+                    _to_utc_iso(job.created_at),
+                    _to_utc_iso(job.started_at) if job.started_at else None,
+                    _to_utc_iso(job.finished_at) if job.finished_at else None,
                     job.result.content if job.result else None,
                     job.result.pages if job.result else None,
                     job.result.duration_ms if job.result else None,
@@ -480,7 +505,7 @@ class SqliteJobStore:
             return cursor.rowcount > 0
 
     def delete(self, job_id: str, token_id: str) -> bool:
-        """Delete a job owned by ``token_id``, purging any stored result.
+        """Delete a job owned by ``token_id``, removing its stored result.
 
         Args:
             job_id: The job's id.

@@ -121,6 +121,46 @@ class TestJob:
         with pytest.raises(dataclasses.FrozenInstanceError):
             job.status = JobStatus.DONE  # type: ignore[misc]
 
+    def test_lifecycle_fields_default_to_none(self) -> None:
+        job = Job(
+            id="abcd1234abcd1234",
+            token_id="feed0001",
+            output=OutputFormat.MARKDOWN,
+            ocr=OcrMode.AUTO,
+            status=JobStatus.QUEUED,
+            created_at=datetime(2026, 7, 7, tzinfo=UTC),
+        )
+        assert job.started_at is None
+        assert job.finished_at is None
+        assert job.failure_detail is None
+        assert job.result is None
+
+    def test_done_without_result_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="done"):
+            make_job(status=JobStatus.DONE, result=None)
+
+    def test_failed_without_detail_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="failed"):
+            make_job(status=JobStatus.FAILED, failure_detail=None)
+
+    def test_result_on_non_done_job_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="result"):
+            make_job(status=JobStatus.RUNNING, result=make_parsed_document())
+
+    def test_failure_detail_on_non_failed_job_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="failure_detail"):
+            make_job(status=JobStatus.QUEUED, failure_detail="oops")
+
+    @pytest.mark.parametrize("field", ["created_at", "started_at", "finished_at"])
+    def test_naive_timestamps_are_rejected(self, field: str) -> None:
+        # Naive datetimes serialize without an offset and break the store's
+        # lexicographic ordering; the model rejects them at the source.
+        overrides: dict[str, object] = {field: datetime(2026, 7, 7, 12, 0)}  # noqa: DTZ001
+        if field != "created_at":
+            overrides["status"] = JobStatus.RUNNING
+        with pytest.raises(ValueError, match=field):
+            make_job(**overrides)  # type: ignore[arg-type]
+
 
 class TestParsedDocument:
     """The result type carries content plus conversion metadata, immutably."""

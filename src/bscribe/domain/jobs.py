@@ -41,8 +41,4 @@ def create_job(*, token_id: str, output: OutputFormat, ocr: OcrMode) -> Job:
         ocr=ocr,
         status=JobStatus.QUEUED,
         created_at=datetime.now(tz=UTC),
-        started_at=None,
-        finished_at=None,
-        failure_detail=None,
-        result=None,
     )

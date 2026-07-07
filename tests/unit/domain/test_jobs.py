@@ -29,7 +29,7 @@ def test_preserves_submission_parameters() -> None:
 def test_id_is_sixteen_hex_chars() -> None:
     job = create_job(token_id="t", output=OutputFormat.MARKDOWN, ocr=OcrMode.AUTO)
     assert len(job.id) == 16
-    assert all(c in "0123456789abcdef" for c in job.id)
+    int(job.id, 16)  # raises ValueError if not hex
 
 
 def test_ids_are_unique() -> None:
