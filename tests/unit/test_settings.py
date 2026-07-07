@@ -29,7 +29,12 @@ class TestDefaults:
     def test_scratch_dir_defaults_under_system_tempdir(self) -> None:
         assert Settings().scratch_dir == Path(tempfile.gettempdir()) / "bscribe"
 
-    def test_db_path_defaults_to_local_file(self) -> None:
+    def test_db_path_defaults_to_local_file(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The shared conftest points BSCRIBE_DB_PATH at a temp file (the
+        # store is built eagerly by create_app); clear it to see the default.
+        monkeypatch.delenv("BSCRIBE_DB_PATH")
         assert Settings().db_path == Path("bscribe.db")
 
     def test_result_ttl_defaults_to_seven_days(self) -> None:

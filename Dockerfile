@@ -34,9 +34,25 @@ WORKDIR /app
 # --no-editable installs bscribe into the venv, so only the venv is needed.
 COPY --from=builder --chown=bscribe:bscribe /app/.venv /app/.venv
 
+# /data holds the SQLite database (tokens now, jobs from M2). /app stays
+# root-owned (read-only for the service user), so the default db_path must
+# point somewhere bscribe can write — without this, `bscribe serve` dies on
+# startup creating the token schema.
+RUN mkdir /data && chown bscribe:bscribe /data
+ENV BSCRIBE_DB_PATH=/data/bscribe.db
+VOLUME /data
+
 ENV PATH="/app/.venv/bin:${PATH}"
 USER bscribe
 EXPOSE 8000
 
-ENTRYPOINT ["uvicorn", "--factory", "bscribe.app:create_app", \
-            "--host", "0.0.0.0", "--port", "8000"]
+# Exec-form CMD keeps the probe shell-free. Note: `podman build` defaults to
+# OCI image format, which silently drops HEALTHCHECK — build with
+# `--format docker` (make image and CI buildx both emit docker format).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["bscribe", "healthcheck"]
+
+# ENTRYPOINT/CMD split: `serve` is the default, but admin commands work as
+# `podman exec bscribe bscribe token add …` or `podman run IMAGE token list`.
+ENTRYPOINT ["bscribe"]
+CMD ["serve"]
