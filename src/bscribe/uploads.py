@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+import anyio
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -47,9 +49,11 @@ async def spool_upload(upload: AsyncChunkReader, *, dest: Path, max_bytes: int) 
             caller to unlink.
     """
     written = 0
-    with dest.open("wb") as fh:
+    # anyio.open_file writes through a threadpool, so a large upload does not
+    # block the event loop (UploadFile.read is already threadpool-backed).
+    async with await anyio.open_file(dest, "wb") as fh:
         while chunk := await upload.read(CHUNK_SIZE):
             written += len(chunk)
             if written > max_bytes:
                 raise UploadTooLargeError
-            fh.write(chunk)
+            await fh.write(chunk)

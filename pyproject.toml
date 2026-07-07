@@ -7,6 +7,7 @@ license = "MIT"
 authors = [{ name = "Ben Crisp", email = "ben@thecrisp.io" }]
 dynamic = ["version"]
 dependencies = [
+    "anyio",
     "fastapi",
     "liteparse>=2.4.0",
     "pebble>=5.2",
