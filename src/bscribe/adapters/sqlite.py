@@ -37,6 +37,85 @@ _MIGRATIONS: tuple[str, ...] = (
 )
 
 
+def _ensure_schema(db_path: Path) -> None:
+    """Create parent directories and bring the schema up to date.
+
+    Shared by every store class in this module — one ``user_version``
+    governs the whole file, so whichever store is constructed first runs
+    all pending migrations.
+    """
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    # Two connections switching a fresh database into WAL can collide
+    # with "database is locked" *despite* busy_timeout — the busy
+    # handler does not cover the journal-mode switch. Server startup
+    # racing `podman exec … token add` hits exactly this, so retry with
+    # backoff rather than die. Only lock contention is retryable;
+    # permanent failures (unwritable volume, corrupt file) surface
+    # immediately with their real error.
+    for delay_seconds in (0.05, 0.1, 0.2, 0.4, None):
+        try:
+            _init_schema_once(db_path)
+        except sqlite3.OperationalError as exc:
+            retryable = exc.sqlite_errorcode in (
+                sqlite3.SQLITE_BUSY,
+                sqlite3.SQLITE_LOCKED,
+            )
+            if delay_seconds is None or not retryable:
+                raise
+            time.sleep(delay_seconds)
+        else:
+            return
+
+
+def _init_schema_once(db_path: Path) -> None:
+    # autocommit=True: journal_mode cannot change inside a transaction,
+    # and the migration manages its own BEGIN IMMEDIATE explicitly.
+    conn = sqlite3.connect(db_path, autocommit=True)
+    try:
+        conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+        # Fast path: schema current AND journal mode still WAL (it
+        # persists in the file but can be flipped externally, and ADR
+        # 0002's second-writer story depends on it). Reading both takes
+        # no write lock, so store construction — including read-only
+        # CLI commands — never queues behind an in-flight writer.
+        (version,) = conn.execute("PRAGMA user_version").fetchone()
+        (journal_mode,) = conn.execute("PRAGMA journal_mode").fetchone()
+        if version >= len(_MIGRATIONS) and journal_mode == "wal":
+            return
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            # Re-read under the write lock: another process may have
+            # migrated between our connect and the BEGIN.
+            (version,) = conn.execute("PRAGMA user_version").fetchone()
+            for number, ddl in enumerate(_MIGRATIONS[version:], start=version):
+                conn.execute(ddl)
+                # PRAGMA cannot be parameterized; `number` is a local int.
+                conn.execute(f"PRAGMA user_version = {number + 1}")
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.close()
+
+
+@contextmanager
+def _connect(db_path: Path) -> Generator[sqlite3.Connection]:
+    """One transaction per operation: commit on success, always close.
+
+    ``with sqlite3.connect(...)`` alone commits but never closes —
+    per-operation connections must close to release WAL file handles.
+    """
+    conn = sqlite3.connect(db_path, autocommit=False)
+    try:
+        conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _row_to_token(row: tuple[str, str, str, str]) -> Token:
     token_id, label, secret_hash, created_at = row
     return Token(
@@ -63,77 +142,7 @@ class SqliteTokenStore:
             db_path: SQLite file location; parent directories are created.
         """
         self._db_path = db_path
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_schema()
-
-    def _init_schema(self) -> None:
-        # Two connections switching a fresh database into WAL can collide
-        # with "database is locked" *despite* busy_timeout — the busy
-        # handler does not cover the journal-mode switch. Server startup
-        # racing `podman exec … token add` hits exactly this, so retry with
-        # backoff rather than die. Only lock contention is retryable;
-        # permanent failures (unwritable volume, corrupt file) surface
-        # immediately with their real error.
-        for delay_seconds in (0.05, 0.1, 0.2, 0.4, None):
-            try:
-                self._init_schema_once()
-            except sqlite3.OperationalError as exc:
-                retryable = exc.sqlite_errorcode in (
-                    sqlite3.SQLITE_BUSY,
-                    sqlite3.SQLITE_LOCKED,
-                )
-                if delay_seconds is None or not retryable:
-                    raise
-                time.sleep(delay_seconds)
-            else:
-                return
-
-    def _init_schema_once(self) -> None:
-        # autocommit=True: journal_mode cannot change inside a transaction,
-        # and the migration manages its own BEGIN IMMEDIATE explicitly.
-        conn = sqlite3.connect(self._db_path, autocommit=True)
-        try:
-            conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
-            # Fast path: schema current AND journal mode still WAL (it
-            # persists in the file but can be flipped externally, and ADR
-            # 0002's second-writer story depends on it). Reading both takes
-            # no write lock, so store construction — including read-only
-            # CLI commands — never queues behind an in-flight writer.
-            (version,) = conn.execute("PRAGMA user_version").fetchone()
-            (journal_mode,) = conn.execute("PRAGMA journal_mode").fetchone()
-            if version >= len(_MIGRATIONS) and journal_mode == "wal":
-                return
-            conn.execute("PRAGMA journal_mode = WAL")
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                # Re-read under the write lock: another process may have
-                # migrated between our connect and the BEGIN.
-                (version,) = conn.execute("PRAGMA user_version").fetchone()
-                for number, ddl in enumerate(_MIGRATIONS[version:], start=version):
-                    conn.execute(ddl)
-                    # PRAGMA cannot be parameterized; `number` is a local int.
-                    conn.execute(f"PRAGMA user_version = {number + 1}")
-                conn.execute("COMMIT")
-            except BaseException:
-                conn.execute("ROLLBACK")
-                raise
-        finally:
-            conn.close()
-
-    @contextmanager
-    def _connect(self) -> Generator[sqlite3.Connection]:
-        """One transaction per operation: commit on success, always close.
-
-        ``with sqlite3.connect(...)`` alone commits but never closes —
-        per-operation connections must close to release WAL file handles.
-        """
-        conn = sqlite3.connect(self._db_path, autocommit=False)
-        try:
-            conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
-            yield conn
-            conn.commit()
-        finally:
-            conn.close()
+        _ensure_schema(db_path)
 
     def add(self, token: Token) -> None:
         """Persist a new token.
@@ -146,7 +155,7 @@ class SqliteTokenStore:
                 (astronomically rare with generated values — see
                 docs/adr/0002).
         """
-        with self._connect() as conn:
+        with _connect(self._db_path) as conn:
             conn.execute(
                 "INSERT INTO tokens (id, label, secret_hash, created_at)"
                 " VALUES (?, ?, ?, ?)",
@@ -167,7 +176,7 @@ class SqliteTokenStore:
         Returns:
             The matching token, or ``None``.
         """
-        with self._connect() as conn:
+        with _connect(self._db_path) as conn:
             row = conn.execute(
                 "SELECT id, label, secret_hash, created_at FROM tokens"
                 " WHERE secret_hash = ?",
@@ -181,7 +190,7 @@ class SqliteTokenStore:
         Returns:
             All token records, ``created_at`` descending.
         """
-        with self._connect() as conn:
+        with _connect(self._db_path) as conn:
             rows = conn.execute(
                 "SELECT id, label, secret_hash, created_at FROM tokens"
                 " ORDER BY created_at DESC"
@@ -197,6 +206,6 @@ class SqliteTokenStore:
         Returns:
             ``True`` if a row was deleted, ``False`` for an unknown id.
         """
-        with self._connect() as conn:
+        with _connect(self._db_path) as conn:
             cursor = conn.execute("DELETE FROM tokens WHERE id = ?", (token_id,))
             return cursor.rowcount > 0
