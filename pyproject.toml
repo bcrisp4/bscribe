@@ -7,10 +7,12 @@ license = "MIT"
 authors = [{ name = "Ben Crisp", email = "ben@thecrisp.io" }]
 dynamic = ["version"]
 dependencies = [
+    "anyio",
     "fastapi",
     "liteparse>=2.4.0",
     "pebble>=5.2",
     "pydantic-settings>=2.14.2",
+    "python-multipart>=0.0.18",
     "structlog>=26.1.0",
     "typer>=0.15",
     "uvicorn[standard]",

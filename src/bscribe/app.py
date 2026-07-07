@@ -10,7 +10,12 @@ import structlog
 from fastapi import FastAPI, Request, Response
 
 from bscribe.adapters.sqlite import SqliteTokenStore
-from bscribe.errors import register_error_handlers
+from bscribe.api import v1_router
+from bscribe.errors import (
+    UPLOAD_TOO_LARGE_DETAIL,
+    problem_response,
+    register_error_handlers,
+)
 from bscribe.log import configure_logging
 from bscribe.settings import Settings
 from bscribe.workers import WorkerPool
@@ -19,6 +24,13 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable
 
 logger = structlog.get_logger()
+
+# Slack above max_upload_bytes for the Content-Length prefilter: the
+# multipart envelope (boundaries + part headers) inflates the body past the
+# file size, so a bare `> max` threshold would false-reject a legitimate
+# max-size upload. The streaming counter in spool_upload is the authoritative
+# limit; this prefilter only rejects egregious bodies before receipt.
+MULTIPART_OVERHEAD_SLACK = 1 << 20
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -29,8 +41,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ``BSCRIBE_``-prefixed environment variables.
 
     Returns:
-        A configured FastAPI instance. In this bootstrap it exposes only the
-        ``/healthz`` liveness probe; conversion endpoints arrive in M1.
+        A configured FastAPI instance exposing ``/healthz`` and the
+        path-versioned ``/v1`` API (``POST /v1/convert``; async job
+        endpoints arrive in M2).
     """
     if settings is None:
         settings = Settings()
@@ -60,7 +73,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # if missing, and tests can swap in a fake before serving a request.
     # Auth reads it per request via bscribe.auth.require_token.
     app.state.token_store = SqliteTokenStore(settings.db_path)
+    # Ensure the upload scratch dir exists once here rather than on every
+    # request. The M2 startup sweep (docs/design.md — Startup sweep) will also
+    # wipe it; until then per-request cleanup (see api.convert) is the story.
+    settings.scratch_dir.mkdir(parents=True, exist_ok=True)
     register_error_handlers(app)
+
+    max_body_bytes = settings.max_upload_bytes + MULTIPART_OVERHEAD_SLACK
+
+    @app.middleware("http")
+    async def reject_oversized_body(  # pyright: ignore[reportUnusedFunction]
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        """Pre-receipt 413 when an *honest* Content-Length exceeds the cap.
+
+        This runs before routing and therefore before auth, so an oversized
+        unauthenticated upload is rejected here (413) rather than reaching the
+        401 check — a deliberate don't-buffer-a-huge-body tradeoff. It only
+        catches requests that declare an honest, oversized Content-Length;
+        chunked or absent/spoofed headers slip past and are bounded (best
+        effort at single-user scale) by spool_upload's copy-time counter (see
+        docs/design.md — max upload size)."""
+        declared = request.headers.get("content-length")
+        too_big = (
+            declared is not None
+            and declared.isdigit()
+            and int(declared) > max_body_bytes
+        )
+        if too_big:
+            return problem_response(status=413, detail=UPLOAD_TOO_LARGE_DETAIL)
+        return await call_next(request)
 
     # pyright strict flags decorator-registered nested handlers as unused
     # (reportUnusedFunction); the route registration is the real use.
@@ -85,5 +127,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def healthz() -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]
         """Liveness probe. No auth; safe for orchestrator health checks."""
         return {"status": "ok"}
+
+    app.include_router(v1_router)
 
     return app

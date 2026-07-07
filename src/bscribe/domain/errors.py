@@ -3,6 +3,16 @@
 from __future__ import annotations
 
 
+class UnsupportedFormatError(Exception):
+    """An input whose file extension is not on the supported allowlist.
+
+    Gated before dispatch so it maps to 415 on the sync HTTP path; the
+    parsing engine would otherwise collapse an unsupported format into a
+    generic parse failure (422). Carries no extension value — the 415
+    handler emits a fixed, generic detail (see docs/design.md — Privacy).
+    """
+
+
 class DocumentUnparseableError(Exception):
     """A supported-format document that the parsing engine cannot parse.
 

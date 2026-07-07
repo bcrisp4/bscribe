@@ -10,8 +10,10 @@ from __future__ import annotations
 from bscribe.domain.errors import (
     DocumentUnparseableError,
     JobTimeoutError,
+    UnsupportedFormatError,
     WorkerCrashedError,
 )
+from bscribe.domain.formats import SUPPORTED_EXTENSIONS, supported_extension
 from bscribe.domain.models import OcrMode, OutputFormat, ParsedDocument, Token
 from bscribe.domain.ports import ParserPort, TokenStorePort
 from bscribe.domain.tokens import (
@@ -23,6 +25,7 @@ from bscribe.domain.tokens import (
 
 __all__ = [
     "SECRET_PREFIX",
+    "SUPPORTED_EXTENSIONS",
     "DocumentUnparseableError",
     "JobTimeoutError",
     "OcrMode",
@@ -31,8 +34,10 @@ __all__ = [
     "ParserPort",
     "Token",
     "TokenStorePort",
+    "UnsupportedFormatError",
     "WorkerCrashedError",
     "generate_secret",
     "hash_secret",
     "mint_token",
+    "supported_extension",
 ]

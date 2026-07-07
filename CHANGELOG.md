@@ -13,6 +13,13 @@ section is renamed to the new version and becomes the GitHub Release notes.
 
 ### Added
 
+- `POST /v1/convert`: synchronous document conversion. Upload a file
+  (multipart `file`) and get the extracted text back inline as `markdown`
+  (default) or `text`, with `ocr=auto` (default) or `off`. Accepts PDFs,
+  images, and office documents; unsupported formats return `415`, uploads
+  over the size limit (`BSCRIBE_MAX_UPLOAD_BYTES`, default 50 MB) return
+  `413`, and unparseable documents return `422`. Uploads are deleted as soon
+  as parsing finishes, and document content is never logged.
 - Project bootstrap: uv-managed Python 3.14 project, `GET /healthz`, container
   image, and the CI / changelog / release toolchain.
 - Environment-driven configuration via `BSCRIBE_`-prefixed variables (worker

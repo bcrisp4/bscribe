@@ -9,8 +9,15 @@ import pytest
 import structlog
 from fastapi import FastAPI
 
+from bscribe.domain.errors import (
+    DocumentUnparseableError,
+    JobTimeoutError,
+    UnsupportedFormatError,
+    WorkerCrashedError,
+)
 from bscribe.errors import problem_response, register_error_handlers
 from bscribe.log import configure_logging
+from bscribe.uploads import UploadTooLargeError
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -122,6 +129,87 @@ class TestUnexpectedErrors:
             "detail": "Internal server error",
         }
         assert "secret-internals" not in response.text
+
+
+class TestDomainErrorHandlers:
+    """The convert path raises domain/ingestion errors; handlers map them to
+    the status-code contract without echoing any exception message."""
+
+    @staticmethod
+    def make_app() -> FastAPI:
+        app = FastAPI()
+        register_error_handlers(app)
+
+        @app.get("/unsupported")
+        def _unsupported() -> None:  # pyright: ignore[reportUnusedFunction]
+            raise UnsupportedFormatError
+
+        @app.get("/too-large")
+        def _too_large() -> None:  # pyright: ignore[reportUnusedFunction]
+            raise UploadTooLargeError
+
+        @app.get("/unparseable")
+        def _unparseable() -> None:  # pyright: ignore[reportUnusedFunction]
+            raise DocumentUnparseableError("secret-doc-internals")
+
+        @app.get("/unparseable-subclass")
+        def _unparseable_subclass() -> None:  # pyright: ignore[reportUnusedFunction]
+            class EncryptedPdfError(DocumentUnparseableError):
+                pass
+
+            raise EncryptedPdfError("secret-doc-internals")
+
+        @app.get("/timeout")
+        def _timeout() -> None:  # pyright: ignore[reportUnusedFunction]
+            raise JobTimeoutError("secret-doc-internals")
+
+        @app.get("/crash")
+        def _crash() -> None:  # pyright: ignore[reportUnusedFunction]
+            raise WorkerCrashedError("secret-doc-internals")
+
+        return app
+
+    async def test_unsupported_format_is_415_generic(self) -> None:
+        async with make_client(self.make_app()) as client:
+            response = await client.get("/unsupported")
+        assert response.status_code == 415
+        assert response.headers["content-type"].startswith(PROBLEM_JSON)
+        assert response.json()["detail"] == "unsupported input format"
+
+    async def test_upload_too_large_is_413(self) -> None:
+        async with make_client(self.make_app()) as client:
+            response = await client.get("/too-large")
+        assert response.status_code == 413
+        assert response.json()["detail"] == "upload exceeds maximum size"
+
+    async def test_unparseable_is_422_without_internals(self) -> None:
+        async with make_client(self.make_app()) as client:
+            response = await client.get("/unparseable")
+        assert response.status_code == 422
+        assert response.json()["detail"] == "document could not be parsed"
+        assert "secret-doc-internals" not in response.text
+
+    async def test_subclass_of_domain_error_maps_via_mro(self) -> None:
+        # Starlette routes a subclass to the base handler by MRO; the handler
+        # must resolve it to the base's status, not KeyError into a 500.
+        async with make_client(self.make_app()) as client:
+            response = await client.get("/unparseable-subclass")
+        assert response.status_code == 422
+        assert response.json()["detail"] == "document could not be parsed"
+
+    async def test_timeout_is_500_with_timeout_detail(self) -> None:
+        async with make_client(self.make_app()) as client:
+            response = await client.get("/timeout")
+        assert response.status_code == 500
+        assert response.json()["detail"] == "timeout"
+        assert "secret-doc-internals" not in response.text
+
+    async def test_crash_is_500_generic(self) -> None:
+        async with make_client(self.make_app()) as client:
+            response = await client.get("/crash")
+        assert response.status_code == 500
+        assert response.json()["detail"] == "Internal server error"
+        assert "secret-doc-internals" not in response.text
 
 
 class TestProblemResponse:

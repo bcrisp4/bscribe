@@ -20,6 +20,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from bscribe.domain.errors import (
+    DocumentUnparseableError,
+    JobTimeoutError,
+    UnsupportedFormatError,
+    WorkerCrashedError,
+)
+from bscribe.uploads import UploadTooLargeError
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
@@ -27,7 +35,25 @@ if TYPE_CHECKING:
 
 PROBLEM_JSON_MEDIA_TYPE = "application/problem+json"
 
+# Shared so the exception handler and the app's Content-Length prefilter
+# (which runs outside ExceptionMiddleware and cannot raise the exception)
+# emit an identical 413 body instead of two copy-pasted literals.
+UPLOAD_TOO_LARGE_DETAIL = "upload exceeds maximum size"
+
 logger = structlog.get_logger()
+
+# Domain/ingestion exceptions raised on the sync convert path, mapped to the
+# status-code contract (docs/design.md). Details are fixed strings — never
+# ``str(exc)`` — because exception messages can quote parser internals or
+# submitted values (see Privacy). The async path (M2) catches these inside
+# the job runner, so these handlers only ever fire on the sync path.
+_DOMAIN_ERROR_STATUS: dict[type[Exception], tuple[int, str]] = {
+    UnsupportedFormatError: (415, "unsupported input format"),
+    UploadTooLargeError: (413, UPLOAD_TOO_LARGE_DETAIL),
+    DocumentUnparseableError: (422, "document could not be parsed"),
+    JobTimeoutError: (500, "timeout"),
+    WorkerCrashedError: (500, "Internal server error"),
+}
 
 
 def problem_response(
@@ -91,6 +117,23 @@ async def _handle_validation_error(request: Request, exc: Exception) -> Response
     return problem_response(status=400, detail=problems or "Invalid request")
 
 
+async def _handle_domain_error(request: Request, exc: Exception) -> Response:
+    del request
+    # Starlette dispatches by MRO, so a subclass of a mapped error reaches
+    # this handler too; walk the MRO rather than exact-matching type(exc),
+    # which would KeyError (→ generic 500) on any future subclass.
+    for cls in type(exc).__mro__:
+        mapping = _DOMAIN_ERROR_STATUS.get(cls)
+        if mapping is not None:
+            status, detail = mapping
+            return problem_response(status=status, detail=detail)
+    # Unreachable via normal registration (only mapped types are registered);
+    # defensive so a mis-registration degrades to 500, not an unhandled error.
+    return problem_response(  # pragma: no cover
+        status=500, detail="Internal server error"
+    )
+
+
 async def _handle_unexpected_error(request: Request, exc: Exception) -> Response:
     # Type name only, no exc_info and no str(exc): tracebacks and exception
     # messages can quote parser internals or user-supplied values, which the
@@ -112,4 +155,6 @@ def register_error_handlers(app: FastAPI) -> None:
     """
     app.add_exception_handler(StarletteHTTPException, _handle_http_exception)
     app.add_exception_handler(RequestValidationError, _handle_validation_error)
+    for exc_type in _DOMAIN_ERROR_STATUS:
+        app.add_exception_handler(exc_type, _handle_domain_error)
     app.add_exception_handler(Exception, _handle_unexpected_error)
