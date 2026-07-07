@@ -50,6 +50,59 @@ class ParsedDocument:
     duration_ms: float
 
 
+class JobStatus(StrEnum):
+    """Async job lifecycle state; values are the API wire strings.
+
+    Transitions (enforced by the job store, not this type):
+    queued → running → done | failed, plus queued → failed for jobs that
+    never start (docs/design.md — job lifecycle).
+    """
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class Job:
+    """An async conversion job (docs/design.md — Interfaces, M2).
+
+    A point-in-time snapshot: instances are immutable, and lifecycle
+    transitions happen through job-store methods that stamp timestamps and
+    guard the state machine — never by mutating a ``Job``.
+
+    Attributes:
+        id: Opaque immutable identifier (see
+            :func:`bscribe.domain.jobs.create_job`).
+        token_id: Owning bearer token's id — the ownership stamp; every job
+            endpoint is scoped to it. Deliberately no foreign key semantics:
+            a deleted token's jobs orphan until the TTL purge.
+        output: Requested output format, needed to build the result response.
+        ocr: Requested OCR mode, recorded for operator debugging only
+            (this is the request parameter, not the deferred ``ocr_used``
+            signal — see docs/design.md, Closed issues).
+        status: Current lifecycle state.
+        created_at: Submission time, UTC-aware.
+        started_at: When parsing began; ``None`` until running.
+        finished_at: When the job reached a terminal state; ``None`` before.
+        failure_detail: Human-readable failure reason (e.g. ``"timeout"``);
+            non-``None`` iff ``status`` is ``FAILED``.
+        result: Parse result; non-``None`` iff ``status`` is ``DONE``.
+    """
+
+    id: str
+    token_id: str
+    output: OutputFormat
+    ocr: OcrMode
+    status: JobStatus
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    failure_detail: str | None
+    result: ParsedDocument | None
+
+
 @dataclass(frozen=True, slots=True)
 class Token:
     """A bearer-token principal (docs/design.md — Admin CLI, Security).

@@ -14,8 +14,16 @@ from bscribe.domain.errors import (
     WorkerCrashedError,
 )
 from bscribe.domain.formats import SUPPORTED_EXTENSIONS, supported_extension
-from bscribe.domain.models import OcrMode, OutputFormat, ParsedDocument, Token
-from bscribe.domain.ports import ParserPort, TokenStorePort
+from bscribe.domain.jobs import create_job
+from bscribe.domain.models import (
+    Job,
+    JobStatus,
+    OcrMode,
+    OutputFormat,
+    ParsedDocument,
+    Token,
+)
+from bscribe.domain.ports import JobStorePort, ParserPort, TokenStorePort
 from bscribe.domain.tokens import (
     SECRET_PREFIX,
     generate_secret,
@@ -27,6 +35,9 @@ __all__ = [
     "SECRET_PREFIX",
     "SUPPORTED_EXTENSIONS",
     "DocumentUnparseableError",
+    "Job",
+    "JobStatus",
+    "JobStorePort",
     "JobTimeoutError",
     "OcrMode",
     "OutputFormat",
@@ -36,6 +47,7 @@ __all__ = [
     "TokenStorePort",
     "UnsupportedFormatError",
     "WorkerCrashedError",
+    "create_job",
     "generate_secret",
     "hash_secret",
     "mint_token",
