@@ -21,9 +21,10 @@ def _isolate_bscribe_env(  # pyright: ignore[reportUnusedFunction]
     """Strip ambient BSCRIBE_* env vars so a developer's shell can't skew tests.
 
     Also points ``BSCRIBE_DB_PATH`` at a per-test temp file: the default is
-    cwd-relative, and ``create_app`` builds the token store eagerly — without
-    this, every test that builds an app would write ``bscribe.db`` into the
-    repo root and xdist workers would race each other on one shared file.
+    an absolute path under the developer's ``~/.local/share``, and
+    ``create_app`` builds the token store eagerly — without this, every test
+    that builds an app would write to (and share) the developer's real
+    database file, and xdist workers would race each other on it.
     """
     # Snapshot the keys: delenv mutates os.environ immediately, and deleting
     # while iterating it raises RuntimeError.

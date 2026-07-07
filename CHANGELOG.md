@@ -53,6 +53,7 @@ section is renamed to the new version and becomes the GitHub Release notes.
 - Unexpected errors are logged without tracebacks or exception messages, which
   could quote parser internals or user-supplied values (privacy contract).
 - Container builds no longer reuse a stale cached wheel when only source files
-  changed (uv `cache-keys` now includes `src/**/*.py`).
+  changed (the image build now forces the project wheel to rebuild with
+  `uv sync --reinstall-package bscribe`).
 
 [Unreleased]: https://github.com/bcrisp4/bscribe/commits/main

@@ -132,6 +132,16 @@ class TestSqliteTokenStore:
             SqliteTokenStore(tmp_path)
         assert sleeps == []
 
+    def test_init_restores_wal_if_externally_disabled(self, tmp_path: Path) -> None:
+        """ADR 0002 depends on WAL; a flipped journal mode must not persist."""
+        db = tmp_path / "tokens.db"
+        SqliteTokenStore(db)
+        with sqlite3.connect(db, autocommit=True) as conn:
+            conn.execute("PRAGMA journal_mode = DELETE")
+        SqliteTokenStore(db)
+        with sqlite3.connect(db) as conn:
+            assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+
     def test_init_on_current_schema_takes_no_write_lock(self, tmp_path: Path) -> None:
         """Read-only CLI commands must not queue behind server writers."""
         db = tmp_path / "tokens.db"

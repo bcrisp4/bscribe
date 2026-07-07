@@ -94,12 +94,14 @@ class SqliteTokenStore:
         conn = sqlite3.connect(self._db_path, autocommit=True)
         try:
             conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
-            # Fast path: schema already current. Skips the write lock and
-            # the WAL pragma (journal mode persists in the file), so store
-            # construction — including read-only CLI commands — never
-            # queues behind an in-flight writer.
+            # Fast path: schema current AND journal mode still WAL (it
+            # persists in the file but can be flipped externally, and ADR
+            # 0002's second-writer story depends on it). Reading both takes
+            # no write lock, so store construction — including read-only
+            # CLI commands — never queues behind an in-flight writer.
             (version,) = conn.execute("PRAGMA user_version").fetchone()
-            if version >= len(_MIGRATIONS):
+            (journal_mode,) = conn.execute("PRAGMA journal_mode").fetchone()
+            if version >= len(_MIGRATIONS) and journal_mode == "wal":
                 return
             conn.execute("PRAGMA journal_mode = WAL")
             conn.execute("BEGIN IMMEDIATE")
