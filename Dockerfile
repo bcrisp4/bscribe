@@ -74,8 +74,9 @@ COPY --from=builder --chown=bscribe:bscribe /app/.venv /app/.venv
 # liteparse's bundled OCR (the tesseract-rs crate) is NOT self-contained: on the
 # first OCR it DOWNLOADS eng.traineddata (tessdata_best, ~15MB) from GitHub and
 # caches it under $HOME/.tesseract-rs/tessdata. That breaks us three ways — a
-# runtime network dependency, a read-only root filesystem (nowhere to cache), and
-# the non-root service user (HOME=/app is not writable). So we bake the exact
+# runtime network dependency; the hardened read-only root filesystem at runtime
+# (nowhere to write the cache); and the non-root service user, which cannot
+# write to its root-owned home even on a writable rootfs. So we bake the exact
 # file it fetches at build time (network available here) into the service user's
 # cache, owned by bscribe and read at runtime — no download, no runtime write.
 # HOME is pinned so tesseract-rs resolves the same path the download path uses.

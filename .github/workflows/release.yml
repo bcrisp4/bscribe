@@ -21,8 +21,11 @@ jobs:
     name: build ${{ matrix.platform }}
     runs-on: ${{ matrix.runner }}
     permissions:
-      contents: read       # actions/checkout (a job permissions block resets
-      packages: write      # every unlisted scope to none — checkout needs this
+      # A job permissions block resets every unlisted scope to none, so both
+      # scopes must be named explicitly: checkout needs `contents: read`, the
+      # push-by-digest to GHCR needs `packages: write`.
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:

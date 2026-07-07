@@ -80,8 +80,9 @@ an unrelated database.
 bscribe serves plain HTTP and is meant to sit behind Tailscale or a reverse proxy
 that terminates TLS; it is never exposed directly to the public internet (see
 design.md — Security). Bind it to the tailnet interface or keep `-p` on a trusted
-network. `/healthz` and `/metrics` are unauthenticated and intended for
-liveness probing and Prometheus scraping inside that boundary.
+network. `/healthz` is unauthenticated, for liveness probing inside that
+boundary. An unauthenticated `/metrics` endpoint for Prometheus scraping arrives
+in M3 (see design.md — Monitoring & alerting); it is not exposed yet.
 
 ## Configuration
 
