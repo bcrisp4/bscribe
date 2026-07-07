@@ -37,11 +37,22 @@ section is renamed to the new version and becomes the GitHub Release notes.
   `token add/list/delete` manage bearer tokens locally on the host — token
   management is deliberately not available over HTTP. Secrets are shown once
   at creation and cannot be recovered. The token database lives at
-  `/data/bscribe.db` in the container (`BSCRIBE_DB_PATH`).
+  `/data/bscribe.db` in the container (`BSCRIBE_DB_PATH`); outside the
+  container it defaults to `~/.local/share/bscribe/bscribe.db`, and
+  `token list`/`token delete` fail cleanly instead of creating a new empty
+  database when pointed at a missing file.
+- `bscribe serve` binds loopback by default (the container binds all
+  interfaces via `BSCRIBE_HOST`), reads `BSCRIBE_HOST`/`BSCRIBE_PORT` from the
+  environment, and passes any extra arguments straight to uvicorn — the full
+  uvicorn flag surface (`--proxy-headers`, `--root-path`, …) remains
+  available. Setting `BSCRIBE_PORT` moves the server and the container health
+  probe together.
 
 ### Fixed
 
 - Unexpected errors are logged without tracebacks or exception messages, which
   could quote parser internals or user-supplied values (privacy contract).
+- Container builds no longer reuse a stale cached wheel when only source files
+  changed (uv `cache-keys` now includes `src/**/*.py`).
 
 [Unreleased]: https://github.com/bcrisp4/bscribe/commits/main

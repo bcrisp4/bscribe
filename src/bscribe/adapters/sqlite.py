@@ -71,12 +71,18 @@ class SqliteTokenStore:
         # with "database is locked" *despite* busy_timeout — the busy
         # handler does not cover the journal-mode switch. Server startup
         # racing `podman exec … token add` hits exactly this, so retry with
-        # backoff rather than die.
+        # backoff rather than die. Only lock contention is retryable;
+        # permanent failures (unwritable volume, corrupt file) surface
+        # immediately with their real error.
         for delay_seconds in (0.05, 0.1, 0.2, 0.4, None):
             try:
                 self._init_schema_once()
-            except sqlite3.OperationalError:
-                if delay_seconds is None:
+            except sqlite3.OperationalError as exc:
+                retryable = exc.sqlite_errorcode in (
+                    sqlite3.SQLITE_BUSY,
+                    sqlite3.SQLITE_LOCKED,
+                )
+                if delay_seconds is None or not retryable:
                     raise
                 time.sleep(delay_seconds)
             else:
@@ -88,6 +94,13 @@ class SqliteTokenStore:
         conn = sqlite3.connect(self._db_path, autocommit=True)
         try:
             conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+            # Fast path: schema already current. Skips the write lock and
+            # the WAL pragma (journal mode persists in the file), so store
+            # construction — including read-only CLI commands — never
+            # queues behind an in-flight writer.
+            (version,) = conn.execute("PRAGMA user_version").fetchone()
+            if version >= len(_MIGRATIONS):
+                return
             conn.execute("PRAGMA journal_mode = WAL")
             conn.execute("BEGIN IMMEDIATE")
             try:

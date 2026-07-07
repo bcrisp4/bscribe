@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import http.server
+import os
+import socket
 import threading
 from typing import TYPE_CHECKING
 
@@ -62,10 +64,18 @@ class TestTokenList:
         assert secret not in result.output
         assert token.secret_hash not in result.output
 
-    def test_empty_store_exits_zero(self, db_path: Path) -> None:
-        del db_path
+    def test_empty_existing_store_exits_zero(self, db_path: Path) -> None:
+        SqliteTokenStore(db_path)  # create the database, no tokens
         result = runner.invoke(app, ["token", "list"])
         assert result.exit_code == 0
+
+    def test_missing_database_exits_one_without_creating_it(
+        self, db_path: Path
+    ) -> None:
+        """A wrong path must not fabricate an empty DB and report 'no tokens'."""
+        result = runner.invoke(app, ["token", "list"])
+        assert result.exit_code == 1
+        assert not db_path.exists()
 
 
 class TestTokenDelete:
@@ -78,9 +88,16 @@ class TestTokenDelete:
         assert store.list_all() == []
 
     def test_unknown_id_exits_one(self, db_path: Path) -> None:
-        del db_path
+        SqliteTokenStore(db_path)  # create the database, no tokens
         result = runner.invoke(app, ["token", "delete", "deadbeef"])
         assert result.exit_code == 1
+
+    def test_missing_database_exits_one_without_creating_it(
+        self, db_path: Path
+    ) -> None:
+        result = runner.invoke(app, ["token", "delete", "deadbeef"])
+        assert result.exit_code == 1
+        assert not db_path.exists()
 
 
 @pytest.fixture
@@ -104,13 +121,31 @@ def health_server() -> Iterator[str]:
         server.shutdown()
 
 
+@pytest.fixture
+def garbage_server() -> Iterator[str]:
+    """Socket that answers any connection with non-HTTP bytes."""
+    listener = socket.create_server(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+
+    def serve_one() -> None:
+        conn, _ = listener.accept()
+        conn.sendall(b"definitely not http\n")
+        conn.close()
+
+    thread = threading.Thread(target=serve_one, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{port}/healthz"
+    finally:
+        listener.close()
+
+
 class TestHealthcheck:
     def test_healthy_server_exits_zero(self, health_server: str) -> None:
         result = runner.invoke(app, ["healthcheck", "--url", health_server])
         assert result.exit_code == 0
 
     def test_dead_server_exits_one(self) -> None:
-        # Port from the reserved TEST-NET style range; nothing listens.
         result = runner.invoke(
             app, ["healthcheck", "--url", "http://127.0.0.1:1/healthz"]
         )
@@ -120,37 +155,98 @@ class TestHealthcheck:
         result = runner.invoke(app, ["healthcheck", "--url", "file:///etc/passwd"])
         assert result.exit_code == 1
 
+    def test_malformed_port_exits_one_not_traceback(self) -> None:
+        """http.client.InvalidURL is a ValueError, not an OSError."""
+        result = runner.invoke(
+            app, ["healthcheck", "--url", "http://127.0.0.1:notaport/healthz"]
+        )
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+
+    def test_non_http_responder_exits_one_not_traceback(
+        self, garbage_server: str
+    ) -> None:
+        """http.client.BadStatusLine is an HTTPException, not an OSError."""
+        result = runner.invoke(app, ["healthcheck", "--url", garbage_server])
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+
+    def test_default_url_follows_bscribe_port_env(
+        self, monkeypatch: pytest.MonkeyPatch, health_server: str
+    ) -> None:
+        """Container HEALTHCHECK stays correct when the port moves via env."""
+        port = health_server.rsplit(":", 1)[1].split("/")[0]
+        monkeypatch.setenv("BSCRIBE_PORT", port)
+        result = runner.invoke(app, ["healthcheck"])
+        assert result.exit_code == 0
+
 
 class TestServe:
-    def test_invokes_uvicorn_with_app_factory(
+    @pytest.fixture
+    def execvp_calls(
         self, monkeypatch: pytest.MonkeyPatch
+    ) -> list[tuple[str, list[str]]]:
+        calls: list[tuple[str, list[str]]] = []
+
+        def fake_execvp(file: str, args: list[str]) -> None:
+            calls.append((file, args))
+
+        monkeypatch.setattr(os, "execvp", fake_execvp)
+        return calls
+
+    def test_execs_uvicorn_with_factory_and_loopback_default(
+        self, execvp_calls: list[tuple[str, list[str]]]
     ) -> None:
-        calls: list[tuple[object, dict[str, object]]] = []
-
-        def fake_run(app_ref: object, **kwargs: object) -> None:
-            calls.append((app_ref, kwargs))
-
-        monkeypatch.setattr("uvicorn.run", fake_run)
         result = runner.invoke(app, ["serve"])
         assert result.exit_code == 0
-        assert calls == [
+        assert execvp_calls == [
             (
-                "bscribe.app:create_app",
-                {"factory": True, "host": "0.0.0.0", "port": 8000},  # noqa: S104
+                "uvicorn",
+                [
+                    "uvicorn",
+                    "--factory",
+                    "bscribe.app:create_app",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    "8000",
+                ],
             )
         ]
 
     def test_host_and_port_flags_forwarded(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, execvp_calls: list[tuple[str, list[str]]]
     ) -> None:
-        calls: list[dict[str, object]] = []
-
-        def fake_run(app_ref: object, **kwargs: object) -> None:
-            del app_ref
-            calls.append(kwargs)
-
-        monkeypatch.setattr("uvicorn.run", fake_run)
-        result = runner.invoke(app, ["serve", "--host", "127.0.0.1", "--port", "9000"])
+        result = runner.invoke(
+            app,
+            ["serve", "--host", "0.0.0.0", "--port", "9000"],  # noqa: S104
+        )
         assert result.exit_code == 0
-        assert calls[0]["host"] == "127.0.0.1"
-        assert calls[0]["port"] == 9000
+        argv = execvp_calls[0][1]
+        assert argv[argv.index("--host") + 1] == "0.0.0.0"  # noqa: S104
+        assert argv[argv.index("--port") + 1] == "9000"
+
+    def test_host_and_port_env_defaults(
+        self,
+        execvp_calls: list[tuple[str, list[str]]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The container sets BSCRIBE_HOST/BSCRIBE_PORT instead of CLI flags."""
+        monkeypatch.setenv("BSCRIBE_HOST", "0.0.0.0")  # noqa: S104
+        monkeypatch.setenv("BSCRIBE_PORT", "9001")
+        result = runner.invoke(app, ["serve"])
+        assert result.exit_code == 0
+        argv = execvp_calls[0][1]
+        assert argv[argv.index("--host") + 1] == "0.0.0.0"  # noqa: S104
+        assert argv[argv.index("--port") + 1] == "9001"
+
+    def test_extra_args_passed_through_to_uvicorn(
+        self, execvp_calls: list[tuple[str, list[str]]]
+    ) -> None:
+        """Operators keep the full uvicorn flag surface (proxy headers etc.)."""
+        result = runner.invoke(
+            app, ["serve", "--proxy-headers", "--root-path", "/bscribe"]
+        )
+        assert result.exit_code == 0
+        argv = execvp_calls[0][1]
+        assert argv[-3:] == ["--proxy-headers", "--root-path", "/bscribe"]

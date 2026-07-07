@@ -15,11 +15,11 @@ from typing import TYPE_CHECKING, Annotated
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from bscribe.domain.ports import TokenStorePort
 from bscribe.domain.tokens import hash_secret
 
 if TYPE_CHECKING:
     from bscribe.domain.models import Token
+    from bscribe.domain.ports import TokenStorePort
 
 # auto_error=False: missing-header, wrong-scheme, and unknown-token requests
 # all fall through to the single _unauthorized() below, so the three cases
@@ -62,11 +62,8 @@ def require_token(
         raise _unauthorized()
 
     # app.state attributes are typed Any (Starlette State.__getattr__);
-    # the runtime-checkable port narrows it for strict type checking.
-    store = request.app.state.token_store
-    if not isinstance(store, TokenStorePort):  # pragma: no cover - wiring bug
-        msg = f"app.state.token_store is not a TokenStorePort: {type(store)!r}"
-        raise TypeError(msg)
+    # the declared annotation narrows it statically at zero runtime cost.
+    store: TokenStorePort = request.app.state.token_store
 
     token = store.find_by_secret_hash(hash_secret(credentials.credentials))
     if token is None:

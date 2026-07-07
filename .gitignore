@@ -25,3 +25,8 @@ docs/superpowers/plans/
 
 # Personal Claude Code notes (machine-specific)
 CLAUDE.local.md
+
+# Local SQLite databases (dev runs; contain token hashes)
+*.db
+*.db-wal
+*.db-shm

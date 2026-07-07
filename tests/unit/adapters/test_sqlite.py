@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
+
+import pytest
 
 from bscribe.adapters.sqlite import SqliteTokenStore
 from bscribe.domain.models import Token
@@ -117,3 +120,27 @@ class TestSqliteTokenStore:
             stores = [future.result() for future in futures]
         stores[0].add(make_token())
         assert len(stores[-1].list_all()) == 1
+
+    def test_permanent_open_failure_fails_fast_without_retries(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only the lock race is retryable; a bad path must surface at once."""
+        sleeps: list[float] = []
+        monkeypatch.setattr("bscribe.adapters.sqlite.time.sleep", sleeps.append)
+        with pytest.raises(sqlite3.OperationalError):
+            # A directory is not a database file: unable-to-open, permanent.
+            SqliteTokenStore(tmp_path)
+        assert sleeps == []
+
+    def test_init_on_current_schema_takes_no_write_lock(self, tmp_path: Path) -> None:
+        """Read-only CLI commands must not queue behind server writers."""
+        db = tmp_path / "tokens.db"
+        SqliteTokenStore(db)  # migrate once
+        blocker = sqlite3.connect(db, autocommit=True)
+        try:
+            blocker.execute("BEGIN IMMEDIATE")  # simulate in-flight writer
+            start = time.monotonic()
+            SqliteTokenStore(db)  # must not wait on busy_timeout
+            assert time.monotonic() - start < 1.0
+        finally:
+            blocker.close()

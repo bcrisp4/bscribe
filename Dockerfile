@@ -18,9 +18,12 @@ COPY src ./src
 # --no-editable so the venv is self-contained (no .pth pointing at /app/src),
 # making the runtime copy robust. Cache mount keys on the pretend-version env
 # via [tool.uv] cache-keys, so a changed version rebuilds rather than serving a
-# stale cached wheel.
+# stale cached wheel. --reinstall-package bscribe forces the project wheel
+# itself to rebuild every time: the cache keys deliberately exclude src/**
+# (see pyproject.toml), so without this a src-only change would ship the
+# previous cached wheel.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev --no-editable
+    uv sync --locked --no-dev --no-editable --reinstall-package bscribe
 
 # --- Runtime: slim image, non-root ---
 # Match the builder's Debian release (bookworm) so the interpreter and glibc
@@ -40,6 +43,10 @@ COPY --from=builder --chown=bscribe:bscribe /app/.venv /app/.venv
 # startup creating the token schema.
 RUN mkdir /data && chown bscribe:bscribe /data
 ENV BSCRIBE_DB_PATH=/data/bscribe.db
+# serve defaults to loopback outside the container; in here, bind all
+# interfaces. Change the port with BSCRIBE_PORT (not `serve --port`) so the
+# HEALTHCHECK probe follows it.
+ENV BSCRIBE_HOST=0.0.0.0
 VOLUME /data
 
 ENV PATH="/app/.venv/bin:${PATH}"
@@ -52,7 +59,10 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["bscribe", "healthcheck"]
 
-# ENTRYPOINT/CMD split: `serve` is the default, but admin commands work as
-# `podman exec bscribe bscribe token add …` or `podman run IMAGE token list`.
+# ENTRYPOINT/CMD split: `serve` is the default; admin commands run against
+# the live server's database via `podman exec <container> bscribe token …`.
+# (A fresh `podman run IMAGE token …` would get its own anonymous /data
+# volume — an empty, unrelated database — so exec into the running
+# container instead.)
 ENTRYPOINT ["bscribe"]
 CMD ["serve"]

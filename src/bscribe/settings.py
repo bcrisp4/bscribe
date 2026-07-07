@@ -19,6 +19,13 @@ def _default_scratch_dir() -> Path:
     return Path(tempfile.gettempdir()) / "bscribe"
 
 
+def _default_db_path() -> Path:
+    # Absolute on purpose: a cwd-relative default makes the CLI and server
+    # silently operate on different database files depending on where each
+    # was started. The container overrides this with BSCRIBE_DB_PATH=/data.
+    return Path.home() / ".local" / "share" / "bscribe" / "bscribe.db"
+
+
 class Settings(BaseSettings):
     """Typed, immutable bscribe configuration.
 
@@ -30,7 +37,9 @@ class Settings(BaseSettings):
         max_upload_bytes: Global upload size limit (rejected with 413).
         scratch_dir: Transient upload storage (startup wipe arrives with the
             job store — see design doc "Startup sweep").
-        db_path: SQLite database file (tokens now, jobs from M2).
+        db_path: SQLite database file (tokens now, jobs from M2). Absolute
+            default under the user data dir; the container image sets
+            ``BSCRIBE_DB_PATH=/data/bscribe.db``.
         result_ttl_seconds: How long job results are retained for pickup.
         log_level: Minimum level emitted by the structlog pipeline.
     """
@@ -42,6 +51,6 @@ class Settings(BaseSettings):
     worker_max_tasks: int = Field(default=100, ge=0)
     max_upload_bytes: int = Field(default=50 * 1024 * 1024, gt=0)
     scratch_dir: Path = Field(default_factory=_default_scratch_dir)
-    db_path: Path = Path("bscribe.db")
+    db_path: Path = Field(default_factory=_default_db_path)
     result_ttl_seconds: int = Field(default=7 * 24 * 3600, gt=0)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
