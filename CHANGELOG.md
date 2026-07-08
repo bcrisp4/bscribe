@@ -26,6 +26,10 @@ section is renamed to the new version and becomes the GitHub Release notes.
   state (`204`). A running job's worker process is killed immediately and
   its staged upload is deleted; a finished job's stored result is purged.
 
+### Dependencies
+
+- Bump `liteparse` from 2.4.0 to 2.5.0 ([#34](https://github.com/bcrisp4/bscribe/pull/34))
+
 ## [0.1.0] - 2026-07-07
 
 ### Added
