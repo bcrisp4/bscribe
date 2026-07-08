@@ -25,6 +25,11 @@ def _isolate_bscribe_env(  # pyright: ignore[reportUnusedFunction]
     ``create_app`` builds the token store eagerly — without this, every test
     that builds an app would write to (and share) the developer's real
     database file, and xdist workers would race each other on it.
+
+    ``BSCRIBE_SCRATCH_DIR`` gets the same treatment: the app lifespan's
+    startup sweep deletes the scratch dir's contents, so a test running the
+    real lifespan against the default (a shared path under the host's temp
+    dir) would wipe files that other processes staged there.
     """
     # Snapshot the keys: delenv mutates os.environ immediately, and deleting
     # while iterating it raises RuntimeError.
@@ -32,3 +37,4 @@ def _isolate_bscribe_env(  # pyright: ignore[reportUnusedFunction]
         if name.startswith("BSCRIBE_"):
             monkeypatch.delenv(name)
     monkeypatch.setenv("BSCRIBE_DB_PATH", str(tmp_path / "bscribe.db"))
+    monkeypatch.setenv("BSCRIBE_SCRATCH_DIR", str(tmp_path / "scratch"))

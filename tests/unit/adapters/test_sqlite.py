@@ -568,3 +568,129 @@ class TestSqliteJobStore:
         job = make_job()
         job_store.add(job)
         assert job_store.get(job.id, job.token_id) == job
+
+    def test_sweep_transitions_queued_and_running_returns_count(
+        self, tmp_path: Path
+    ) -> None:
+        store = SqliteJobStore(tmp_path / "jobs.db")
+        queued = make_job(id="000000000000000a")
+        running = make_job(id="000000000000000b")
+        done = make_job(id="000000000000000c")
+        failed = make_job(id="000000000000000d")
+        store.add(queued)
+        store.add(running)
+        store.add(done)
+        store.add(failed)
+        store.mark_running(running.id)
+        store.mark_running(done.id)
+        result = make_result()
+        store.mark_done(done.id, result)
+        store.mark_failed(failed.id, "timeout")
+
+        detail = "interrupted by restart — resubmit"
+        assert store.sweep_incomplete(detail) == 2
+
+        for job_id in (queued.id, running.id):
+            found = store.get(job_id, queued.token_id)
+            assert found is not None
+            assert found.status is JobStatus.FAILED
+            assert found.failure_detail == detail
+            assert found.finished_at is not None
+
+        # A done job's result and failure_detail are untouched.
+        found_done = store.get(done.id, done.token_id)
+        assert found_done is not None
+        assert found_done.status is JobStatus.DONE
+        assert found_done.failure_detail is None
+        assert store.get_result(done.id, done.token_id) == result
+
+        # An already-failed job keeps its original detail: the sweep must
+        # never rewrite terminal failures on reboot.
+        found_failed = store.get(failed.id, failed.token_id)
+        assert found_failed is not None
+        assert found_failed.status is JobStatus.FAILED
+        assert found_failed.failure_detail == "timeout"
+
+    def test_swept_row_roundtrips_through_get(self, tmp_path: Path) -> None:
+        """Proves failed => failure_detail invariant _row_to_job enforces."""
+        store = SqliteJobStore(tmp_path / "jobs.db")
+        job = make_job()
+        store.add(job)
+        store.sweep_incomplete("interrupted by restart — resubmit")
+        found = store.get(job.id, job.token_id)
+        assert found is not None
+        assert found.status is JobStatus.FAILED
+        assert found.failure_detail == "interrupted by restart — resubmit"
+
+    def test_sweep_on_empty_store_returns_zero(self, tmp_path: Path) -> None:
+        store = SqliteJobStore(tmp_path / "jobs.db")
+        assert store.sweep_incomplete("interrupted by restart — resubmit") == 0
+
+    def test_purge_deletes_older_rows_across_tokens_returns_count(
+        self, tmp_path: Path
+    ) -> None:
+        store = SqliteJobStore(tmp_path / "jobs.db")
+        old = make_job(
+            id="000000000000000a",
+            token_id="a1b2c3d4",
+            created_at=datetime(2026, 7, 1, tzinfo=UTC),
+        )
+        newer = make_job(
+            id="000000000000000b",
+            token_id="0therT0k",
+            created_at=datetime(2026, 7, 5, tzinfo=UTC),
+        )
+        store.add(old)
+        store.add(newer)
+        store.mark_running(old.id)
+        store.mark_done(old.id, make_result())
+        cutoff = datetime(2026, 7, 3, tzinfo=UTC)
+
+        assert store.purge_older_than(cutoff) == 1
+
+        assert store.get(old.id, "a1b2c3d4") is None
+        assert store.get_result(old.id, "a1b2c3d4") is None
+        assert store.get(newer.id, "0therT0k") == newer
+
+    def test_purge_boundary_normalizes_non_utc_offset(self, tmp_path: Path) -> None:
+        """Mirrors test_created_at_is_stored_normalized_to_utc: the cutoff
+        comparison happens in normalized UTC text, not raw offset strings."""
+        store = SqliteJobStore(tmp_path / "jobs.db")
+        old_plus2 = make_job(
+            id="000000000000000a",
+            # 13:59+02:00 == 11:59Z — just under the UTC cutoff.
+            created_at=datetime(
+                2026, 7, 7, 13, 59, tzinfo=timezone(timedelta(hours=2))
+            ),
+        )
+        store.add(old_plus2)
+        cutoff = datetime(2026, 7, 7, 12, 0, tzinfo=UTC)
+
+        assert store.purge_older_than(cutoff) == 1
+        assert store.get(old_plus2.id, old_plus2.token_id) is None
+
+    def test_purge_boundary_is_strictly_before_cutoff(self, tmp_path: Path) -> None:
+        """A row created at exactly the cutoff instant survives (strict <)."""
+        store = SqliteJobStore(tmp_path / "jobs.db")
+        cutoff = datetime(2026, 7, 7, 12, 0, tzinfo=UTC)
+        at_cutoff = make_job(id="000000000000000a", created_at=cutoff)
+        just_under = make_job(
+            id="000000000000000b",
+            created_at=cutoff - timedelta(microseconds=1),
+        )
+        store.add(at_cutoff)
+        store.add(just_under)
+
+        assert store.purge_older_than(cutoff) == 1
+
+        assert store.get(at_cutoff.id, at_cutoff.token_id) == at_cutoff
+        assert store.get(just_under.id, just_under.token_id) is None
+
+    def test_purge_with_naive_cutoff_raises_generic_message(
+        self, tmp_path: Path
+    ) -> None:
+        store = SqliteJobStore(tmp_path / "jobs.db")
+        with pytest.raises(ValueError, match="aware") as excinfo:
+            store.purge_older_than(datetime(2026, 7, 1))  # noqa: DTZ001
+        # Just a datetime guard, not a document-content-bearing error.
+        assert "job" not in str(excinfo.value)

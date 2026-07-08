@@ -159,6 +159,11 @@ _JOB_COLUMNS = (
     " created_at, started_at, finished_at"
 )
 
+# The queued/running -> failed transition, shared by mark_failed (one job)
+# and sweep_incomplete (all incomplete jobs) so the two can never drift:
+# the same SET clause, differing only in their WHERE scope.
+_FAIL_TRANSITION_SET = "UPDATE jobs SET status = ?, finished_at = ?, failure_detail = ?"
+
 
 def _to_utc_iso(value: datetime) -> str:
     """Serialize an aware datetime as UTC isoformat TEXT (sortable)."""
@@ -518,8 +523,7 @@ class SqliteJobStore:
         """
         with _connect(self._db_path) as conn:
             cursor = conn.execute(
-                "UPDATE jobs SET status = ?, finished_at = ?, failure_detail = ?"
-                " WHERE id = ? AND status IN (?, ?)",
+                _FAIL_TRANSITION_SET + " WHERE id = ? AND status IN (?, ?)",
                 (
                     JobStatus.FAILED.value,
                     datetime.now(tz=UTC).isoformat(),
@@ -548,3 +552,50 @@ class SqliteJobStore:
                 (job_id, token_id),
             )
             return cursor.rowcount > 0
+
+    def sweep_incomplete(self, detail: str) -> int:
+        """Mark every queued/running job failed with ``detail``.
+
+        Args:
+            detail: Fixed failure reason to stamp on every transitioned job.
+
+        Returns:
+            The number of jobs transitioned.
+        """
+        with _connect(self._db_path) as conn:
+            cursor = conn.execute(
+                _FAIL_TRANSITION_SET + " WHERE status IN (?, ?)",
+                (
+                    JobStatus.FAILED.value,
+                    _to_utc_iso(datetime.now(tz=UTC)),
+                    detail,
+                    JobStatus.QUEUED.value,
+                    JobStatus.RUNNING.value,
+                ),
+            )
+            return cursor.rowcount
+
+    def purge_older_than(self, cutoff: datetime) -> int:
+        """Delete every job created before ``cutoff``, any status or token.
+
+        Args:
+            cutoff: Timezone-aware boundary; jobs created strictly before
+                it, including their stored results, are deleted.
+
+        Returns:
+            The number of jobs deleted.
+
+        Raises:
+            ValueError: ``cutoff`` is naive.
+        """
+        if cutoff.tzinfo is None:
+            msg = "cutoff must be timezone-aware"
+            raise ValueError(msg)
+        # Full table scan is deliberate — no index; dozens of rows at
+        # single-user scale with 7-day retention.
+        with _connect(self._db_path) as conn:
+            cursor = conn.execute(
+                "DELETE FROM jobs WHERE created_at < ?",
+                (_to_utc_iso(cutoff),),
+            )
+            return cursor.rowcount

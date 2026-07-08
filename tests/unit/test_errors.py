@@ -15,7 +15,11 @@ from bscribe.domain.errors import (
     UnsupportedFormatError,
     WorkerCrashedError,
 )
-from bscribe.errors import problem_response, register_error_handlers
+from bscribe.errors import (
+    INTERRUPTED_BY_RESTART_DETAIL,
+    problem_response,
+    register_error_handlers,
+)
 from bscribe.log import configure_logging
 from bscribe.uploads import UploadTooLargeError
 
@@ -210,6 +214,13 @@ class TestDomainErrorHandlers:
         assert response.status_code == 500
         assert response.json()["detail"] == "Internal server error"
         assert "secret-doc-internals" not in response.text
+
+
+class TestFailureDetailVocabulary:
+    def test_interrupted_by_restart_detail_is_pinned(self) -> None:
+        """docs/design.md:153 — the startup sweep's fixed failure_detail
+        string; an em dash (U+2014), not a hyphen."""
+        assert INTERRUPTED_BY_RESTART_DETAIL == "interrupted by restart — resubmit"
 
 
 class TestProblemResponse:

@@ -25,6 +25,12 @@ section is renamed to the new version and becomes the GitHub Release notes.
 - Job cancellation: `DELETE /v1/jobs/{id}` cancels and purges a job in any
   state (`204`). A running job's worker process is killed immediately and
   its staged upload is deleted; a finished job's stored result is purged.
+- Async jobs and their results are now automatically purged after a
+  configurable TTL (`BSCRIBE_RESULT_TTL_SECONDS`, default 7 days); purge
+  runs periodically (`BSCRIBE_PURGE_INTERVAL_SECONDS`, default 1 hour).
+- On startup, jobs interrupted by a restart are marked `failed` with detail
+  `"interrupted by restart — resubmit"`, and the upload scratch directory
+  is wiped.
 
 ### Dependencies
 

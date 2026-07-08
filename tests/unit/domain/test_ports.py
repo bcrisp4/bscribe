@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
@@ -116,6 +116,138 @@ class TestJobStorePortConformance:
 
     def test_token_store_does_not_satisfy_job_store_port(self) -> None:
         assert not isinstance(FakeTokenStore(), JobStorePort)
+
+    def test_sweep_transitions_queued_and_running_to_failed(self) -> None:
+        store = FakeJobStore()
+        queued = Job(
+            id="000000000000000a",
+            token_id="feed0001",
+            output=OutputFormat.MARKDOWN,
+            ocr=OcrMode.AUTO,
+            status=JobStatus.QUEUED,
+            created_at=datetime(2026, 7, 7, tzinfo=UTC),
+        )
+        running = Job(
+            id="000000000000000b",
+            token_id="feed0001",
+            output=OutputFormat.MARKDOWN,
+            ocr=OcrMode.AUTO,
+            status=JobStatus.QUEUED,
+            created_at=datetime(2026, 7, 7, tzinfo=UTC),
+        )
+        store.add(queued)
+        store.add(running)
+        store.mark_running(running.id)
+
+        assert store.sweep_incomplete("interrupted by restart — resubmit") == 2
+
+        for job_id in (queued.id, running.id):
+            found = store.get(job_id, "feed0001")
+            assert found is not None
+            assert found.status is JobStatus.FAILED
+            assert found.failure_detail == "interrupted by restart — resubmit"
+            assert found.finished_at is not None
+
+    def test_sweep_leaves_terminal_jobs_untouched(self) -> None:
+        store = FakeJobStore()
+        done = Job(
+            id="000000000000000a",
+            token_id="feed0001",
+            output=OutputFormat.MARKDOWN,
+            ocr=OcrMode.AUTO,
+            status=JobStatus.QUEUED,
+            created_at=datetime(2026, 7, 7, tzinfo=UTC),
+        )
+        failed = Job(
+            id="000000000000000b",
+            token_id="feed0001",
+            output=OutputFormat.MARKDOWN,
+            ocr=OcrMode.AUTO,
+            status=JobStatus.QUEUED,
+            created_at=datetime(2026, 7, 7, tzinfo=UTC),
+        )
+        store.add(done)
+        store.add(failed)
+        store.mark_running(done.id)
+        store.mark_done(
+            done.id, ParsedDocument(content="text", pages=1, duration_ms=1.0)
+        )
+        store.mark_failed(failed.id, "timeout")
+
+        assert store.sweep_incomplete("interrupted by restart — resubmit") == 0
+
+        assert store.get(done.id, "feed0001").status is JobStatus.DONE  # type: ignore[union-attr]
+        found_failed = store.get(failed.id, "feed0001")
+        assert found_failed is not None
+        assert found_failed.failure_detail == "timeout"
+
+    def test_sweep_on_empty_store_returns_zero(self) -> None:
+        assert FakeJobStore().sweep_incomplete("interrupted by restart") == 0
+
+    def test_purge_deletes_strictly_older_rows_across_tokens(self) -> None:
+        store = FakeJobStore()
+        old = Job(
+            id="000000000000000a",
+            token_id="feed0001",
+            output=OutputFormat.MARKDOWN,
+            ocr=OcrMode.AUTO,
+            status=JobStatus.QUEUED,
+            created_at=datetime(2026, 7, 1, tzinfo=UTC),
+        )
+        new = Job(
+            id="000000000000000b",
+            token_id="0therT0k",
+            output=OutputFormat.MARKDOWN,
+            ocr=OcrMode.AUTO,
+            status=JobStatus.QUEUED,
+            created_at=datetime(2026, 7, 5, tzinfo=UTC),
+        )
+        store.add(old)
+        store.add(new)
+        store.mark_running(old.id)
+        store.mark_done(
+            old.id, ParsedDocument(content="text", pages=1, duration_ms=1.0)
+        )
+        cutoff = datetime(2026, 7, 3, tzinfo=UTC)
+
+        assert store.purge_older_than(cutoff) == 1
+
+        assert store.get(old.id, "feed0001") is None
+        assert store.get_result(old.id, "feed0001") is None
+        assert store.get(new.id, "0therT0k") == new
+
+    def test_purge_boundary_is_strictly_before_cutoff(self) -> None:
+        """A job created at exactly the cutoff instant survives (strict <)."""
+        store = FakeJobStore()
+        cutoff = datetime(2026, 7, 3, tzinfo=UTC)
+        at_cutoff = Job(
+            id="000000000000000a",
+            token_id="feed0001",
+            output=OutputFormat.MARKDOWN,
+            ocr=OcrMode.AUTO,
+            status=JobStatus.QUEUED,
+            created_at=cutoff,
+        )
+        just_under = Job(
+            id="000000000000000b",
+            token_id="feed0001",
+            output=OutputFormat.MARKDOWN,
+            ocr=OcrMode.AUTO,
+            status=JobStatus.QUEUED,
+            created_at=cutoff - timedelta(microseconds=1),
+        )
+        store.add(at_cutoff)
+        store.add(just_under)
+
+        assert store.purge_older_than(cutoff) == 1
+
+        assert store.get(at_cutoff.id, "feed0001") == at_cutoff
+        assert store.get(just_under.id, "feed0001") is None
+
+    def test_purge_with_naive_cutoff_raises(self) -> None:
+        store = FakeJobStore()
+        with pytest.raises(ValueError, match="aware"):
+            store.purge_older_than(datetime(2026, 7, 1))  # noqa: DTZ001
 
 
 class TestTokenStorePortConformance:
