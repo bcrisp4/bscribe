@@ -7,11 +7,14 @@ immediately and hands the staged upload to :class:`bscribe.runner.JobRunner`,
 which parses it on the same worker pool the sync path uses — one bound
 governs total parse concurrency.
 
-Every read endpoint is token-scoped: another token's job (or an unknown id)
-is a ``404`` raised from one place with one detail string, so the two cases
-are indistinguishable by construction (docs/design.md — Ownership). Status
-and list reads return metadata only; the stored content is read exclusively
-by the result endpoint (``JobStorePort``'s metadata/result split).
+Every job endpoint after submission is token-scoped: another token's job
+(or an unknown id) is a ``404`` raised from one place with one detail
+string, so the two cases are indistinguishable by construction
+(docs/design.md — Ownership). Status and list reads return metadata only;
+the stored content is read exclusively by the result endpoint
+(``JobStorePort``'s metadata/result split). ``DELETE`` cancels and purges
+in any state — cancelling the runner task is what kills a running job's
+worker process.
 
 The GET handlers are sync ``def`` on purpose: FastAPI runs them on the
 threadpool, which is where the SQLite-backed store must be called from
@@ -124,6 +127,34 @@ def get_job(
     if job is None:
         raise _job_not_found()
     return JobResponse.from_job(job)
+
+
+@router.delete("/{job_id}", status_code=204)
+async def delete_job(
+    request: Request,
+    token: Annotated[Token, Depends(require_token)],
+    job_id: str,
+) -> Response:
+    """Cancel and purge a job in any state (docs/design.md — Endpoints).
+
+    The row (and any stored result) is purged before the response; the
+    in-flight task, if any, is cancelled fire-and-forget — ``WorkerPool.parse``
+    turns the cancellation into a SIGKILL of a running worker, and the
+    runner's cleanup deletes the scratch upload. Deleting the row first makes
+    the task's late ``mark_*`` calls safe no-ops (the races the runner
+    already handles), so no per-state branching is needed here.
+    """
+    store = request.app.state.job_store
+    runner = request.app.state.job_runner
+    if not await asyncio.to_thread(store.delete, job_id, token.id):
+        raise _job_not_found()
+    task = runner.task_for(job_id)
+    if task is not None:
+        task.cancel()
+    logger.info(
+        "job_deleted", job_id=job_id, token_id=token.id, cancelled=task is not None
+    )
+    return Response(status_code=204)
 
 
 @router.get("/{job_id}/result", response_model=None)
