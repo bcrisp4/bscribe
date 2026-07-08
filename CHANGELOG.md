@@ -11,6 +11,8 @@ section is renamed to the new version and becomes the GitHub Release notes.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-08
+
 ### Added
 
 - Asynchronous conversion jobs: `POST /v1/jobs` accepts the same upload and
@@ -113,6 +115,7 @@ First release candidate for 0.1.0 — cut to validate the release pipeline
 (native multi-arch build, GHCR publish, provenance attestation) before the
 final tag. The changes are those listed under [0.1.0].
 
-[Unreleased]: https://github.com/bcrisp4/bscribe/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/bcrisp4/bscribe/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/bcrisp4/bscribe/releases/tag/v0.2.0
 [0.1.0]: https://github.com/bcrisp4/bscribe/releases/tag/v0.1.0
 [0.1.0-rc1]: https://github.com/bcrisp4/bscribe/releases/tag/v0.1.0-rc1
