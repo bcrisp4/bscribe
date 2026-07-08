@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from bscribe.domain.models import JobStatus, OcrMode, OutputFormat
 
 if TYPE_CHECKING:
-    from bscribe.domain.models import Job
+    from bscribe.domain.models import Job, ParsedDocument
 
 
 class ConvertMetadata(BaseModel):
@@ -39,6 +39,31 @@ class ConvertResponse(BaseModel):
     content: str
     metadata: ConvertMetadata
 
+    @classmethod
+    def from_result(
+        cls, output: OutputFormat, result: ParsedDocument
+    ) -> ConvertResponse:
+        """Map a parse result onto the wire model.
+
+        The one definition of the result → wire mapping (including the
+        ``duration_ms`` rounding), so the sync and async result bodies
+        cannot drift apart.
+
+        Args:
+            output: The format the caller requested.
+            result: The parse result to serialize.
+
+        Returns:
+            The equivalent wire representation.
+        """
+        return cls(
+            output=output,
+            content=result.content,
+            metadata=ConvertMetadata(
+                pages=result.pages, duration_ms=round(result.duration_ms)
+            ),
+        )
+
 
 class JobResponse(BaseModel):
     """One job's wire representation.
@@ -47,8 +72,8 @@ class JobResponse(BaseModel):
     ``GET /v1/jobs/{id}``, items of ``GET /v1/jobs``, and the ``202`` body
     of a not-yet-ready result fetch. A superset of the design-doc sample
     (``id`` + ``status``) — additive fields are allowed by the versioning
-    contract. ``failure_detail`` only ever carries the fixed strings from
-    :mod:`bscribe.errors`/:mod:`bscribe.runner`, never parser output.
+    contract. ``failure_detail`` only ever carries the fixed strings
+    defined in :mod:`bscribe.errors`, never parser output.
     """
 
     id: str

@@ -205,18 +205,47 @@ class TestSqliteJobStore:
         store.add(job)
         assert store.get(job.id, job.token_id) == job
 
-    def test_add_then_get_roundtrip_of_populated_snapshot(self, tmp_path: Path) -> None:
+    def test_every_metadata_column_roundtrips_after_transitions(
+        self, tmp_path: Path
+    ) -> None:
         """Every metadata column, not just the fresh-queued subset, must
-        roundtrip."""
-        store = SqliteJobStore(tmp_path / "jobs.db")
-        job = make_job(
-            status=JobStatus.FAILED,
-            started_at=datetime(2026, 7, 7, 12, 1, tzinfo=UTC),
-            finished_at=datetime(2026, 7, 7, 12, 2, tzinfo=UTC),
-            failure_detail="timeout",
-        )
+        roundtrip. Terminal states are reached via transitions — add()
+        accepts only queued jobs."""
+        db = tmp_path / "jobs.db"
+        store = SqliteJobStore(db)
+        job = make_job()
         store.add(job)
-        assert store.get(job.id, job.token_id) == job
+        store.mark_running(job.id)
+        store.mark_failed(job.id, "timeout")
+        found = store.get(job.id, job.token_id)
+        assert found is not None
+        assert found.status is JobStatus.FAILED
+        assert found.started_at is not None
+        assert found.finished_at is not None
+        assert found.failure_detail == "timeout"
+        # A fresh instance re-reads the same row from disk.
+        assert SqliteJobStore(db).get(job.id, job.token_id) == found
+
+    @pytest.mark.parametrize(
+        "job_overrides",
+        [
+            {"status": JobStatus.RUNNING},
+            {"status": JobStatus.DONE},
+            {"status": JobStatus.FAILED, "failure_detail": "timeout"},
+        ],
+        ids=["running", "done", "failed"],
+    )
+    def test_add_rejects_non_queued_job(
+        self, tmp_path: Path, job_overrides: dict[str, object]
+    ) -> None:
+        """Jobs enter only as queued; a terminal snapshot via add would
+        create states the transitions never produce — most dangerously a
+        done row with no stored result."""
+        store = SqliteJobStore(tmp_path / "jobs.db")
+        job = make_job(**job_overrides)
+        with pytest.raises(ValueError, match="queued"):
+            store.add(job)
+        assert store.get(job.id, job.token_id) is None
 
     def test_created_at_is_stored_normalized_to_utc(self, tmp_path: Path) -> None:
         """Non-UTC offsets must not break the lexicographic newest-first order."""

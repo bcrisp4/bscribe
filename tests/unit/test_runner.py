@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
@@ -16,128 +14,44 @@ from bscribe.domain.errors import (
 )
 from bscribe.domain.jobs import create_job
 from bscribe.domain.models import (
-    Job,
     JobStatus,
     OcrMode,
     OutputFormat,
     ParsedDocument,
 )
-from bscribe.errors import TIMEOUT_DETAIL, UNPARSEABLE_DETAIL
-from bscribe.runner import (
+from bscribe.errors import (
     INTERNAL_ERROR_DETAIL,
+    TIMEOUT_DETAIL,
+    UNPARSEABLE_DETAIL,
     WORKER_CRASHED_DETAIL,
-    JobRunner,
 )
+from bscribe.runner import JobRunner
+from tests.unit.fakes import FakeJobStore, GatedPool
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from bscribe.domain.models import Job
 
-@dataclass
-class RecordingJobStore:
-    """In-memory store recording transitions, with the metadata/result split.
 
-    Mirrors the compare-and-set contract of the real adapter so runner
-    races (delete-before-start, delete-mid-parse) can be simulated.
-    """
-
-    jobs: dict[str, Job] = field(default_factory=dict[str, "Job"])
-    results: dict[str, ParsedDocument] = field(
-        default_factory=dict[str, "ParsedDocument"]
-    )
-
-    def add(self, job: Job) -> None:
-        self.jobs[job.id] = job
-
-    def get(self, job_id: str, token_id: str) -> Job | None:
-        job = self.jobs.get(job_id)
-        return job if job is not None and job.token_id == token_id else None
-
-    def get_result(self, job_id: str, token_id: str) -> ParsedDocument | None:
-        job = self.get(job_id, token_id)
-        if job is None or job.status is not JobStatus.DONE:
-            return None
-        return self.results[job_id]
-
-    def list_for_token(
-        self, token_id: str, *, status: JobStatus | None = None
-    ) -> list[Job]:
-        return [
-            job
-            for job in self.jobs.values()
-            if job.token_id == token_id and (status is None or job.status is status)
-        ]
-
-    def mark_running(self, job_id: str) -> bool:
-        job = self.jobs.get(job_id)
-        if job is None or job.status is not JobStatus.QUEUED:
-            return False
-        self.jobs[job_id] = replace(
-            job, status=JobStatus.RUNNING, started_at=datetime.now(tz=UTC)
-        )
-        return True
+class MarkDoneBrokenStore(FakeJobStore):
+    """Store whose mark_done raises — a transient SQLite failure stand-in."""
 
     def mark_done(self, job_id: str, result: ParsedDocument) -> bool:
-        job = self.jobs.get(job_id)
-        if job is None or job.status is not JobStatus.RUNNING:
-            return False
-        self.jobs[job_id] = replace(
-            job, status=JobStatus.DONE, finished_at=datetime.now(tz=UTC)
-        )
-        self.results[job_id] = result
-        return True
+        del job_id, result
+        raise RuntimeError("database is locked")
+
+
+class FullyBrokenStore(FakeJobStore):
+    """Store where every transition raises — the store is down entirely."""
+
+    def mark_running(self, job_id: str) -> bool:
+        del job_id
+        raise RuntimeError("database is locked")
 
     def mark_failed(self, job_id: str, detail: str) -> bool:
-        job = self.jobs.get(job_id)
-        if job is None or job.status not in (JobStatus.QUEUED, JobStatus.RUNNING):
-            return False
-        self.jobs[job_id] = replace(
-            job,
-            status=JobStatus.FAILED,
-            finished_at=datetime.now(tz=UTC),
-            failure_detail=detail,
-        )
-        return True
-
-    def delete(self, job_id: str, token_id: str) -> bool:
-        if self.get(job_id, token_id) is None:
-            return False
-        del self.jobs[job_id]
-        self.results.pop(job_id, None)
-        return True
-
-
-class GatedPool:
-    """Pool fake whose parse blocks until released (or raises).
-
-    ``started`` lets a test observe the running state deterministically;
-    ``release`` lets it decide when the parse completes.
-    """
-
-    def __init__(
-        self,
-        *,
-        result: ParsedDocument | None = None,
-        exc: Exception | None = None,
-    ) -> None:
-        self._result = result or ParsedDocument(
-            content="# Heading", pages=2, duration_ms=41.7
-        )
-        self._exc = exc
-        self.started = asyncio.Event()
-        self.release = asyncio.Event()
-        self.calls: list[Path] = []
-
-    async def parse(
-        self, path: Path, *, output: OutputFormat, ocr: OcrMode
-    ) -> ParsedDocument:
-        del output, ocr
-        self.calls.append(path)
-        self.started.set()
-        await self.release.wait()
-        if self._exc is not None:
-            raise self._exc
-        return self._result
+        del job_id, detail
+        raise RuntimeError("database is locked")
 
 
 def make_upload(tmp_path: Path) -> Path:
@@ -147,7 +61,7 @@ def make_upload(tmp_path: Path) -> Path:
 
 
 def submit_queued_job(
-    runner: JobRunner, store: RecordingJobStore, pool: GatedPool, upload: Path
+    runner: JobRunner, store: FakeJobStore, pool: GatedPool, upload: Path
 ) -> Job:
     """Persist a fresh job and submit it, as POST /v1/jobs does."""
     job = create_job(
@@ -159,6 +73,7 @@ def submit_queued_job(
         path=upload,
         output=job.output,
         ocr=job.ocr,
+        store=store,
         pool=pool,
     )
     return job
@@ -166,31 +81,31 @@ def submit_queued_job(
 
 class TestJobRunnerHappyPath:
     async def test_job_ends_done_with_result_stored(self, tmp_path: Path) -> None:
-        store = RecordingJobStore()
+        store = FakeJobStore()
         pool = GatedPool()
         pool.release.set()
-        runner = JobRunner(store=store)
+        runner = JobRunner()
         job = submit_queued_job(runner, store, pool, make_upload(tmp_path))
         await runner.drain()
         assert store.jobs[job.id].status is JobStatus.DONE
         assert store.get_result(job.id, job.token_id) == ParsedDocument(
-            content="# Heading", pages=2, duration_ms=41.7
+            content="# Heading", pages=3, duration_ms=41.7
         )
 
     async def test_upload_deleted_after_success(self, tmp_path: Path) -> None:
-        store = RecordingJobStore()
+        store = FakeJobStore()
         pool = GatedPool()
         pool.release.set()
-        runner = JobRunner(store=store)
+        runner = JobRunner()
         upload = make_upload(tmp_path)
         submit_queued_job(runner, store, pool, upload)
         await runner.drain()
         assert not upload.exists()
 
     async def test_job_is_running_while_parse_in_flight(self, tmp_path: Path) -> None:
-        store = RecordingJobStore()
+        store = FakeJobStore()
         pool = GatedPool()
-        runner = JobRunner(store=store)
+        runner = JobRunner()
         job = submit_queued_job(runner, store, pool, make_upload(tmp_path))
         await pool.started.wait()
         assert store.jobs[job.id].status is JobStatus.RUNNING
@@ -200,9 +115,9 @@ class TestJobRunnerHappyPath:
     async def test_task_mapping_exists_in_flight_and_clears_after(
         self, tmp_path: Path
     ) -> None:
-        store = RecordingJobStore()
+        store = FakeJobStore()
         pool = GatedPool()
-        runner = JobRunner(store=store)
+        runner = JobRunner()
         job = submit_queued_job(runner, store, pool, make_upload(tmp_path))
         await pool.started.wait()
         assert runner.task_for(job.id) is not None
@@ -228,10 +143,10 @@ class TestJobRunnerFailures:
     async def test_parse_failure_marks_failed_with_fixed_detail(
         self, tmp_path: Path, exc: Exception, expected_detail: str
     ) -> None:
-        store = RecordingJobStore()
+        store = FakeJobStore()
         pool = GatedPool(exc=exc)
         pool.release.set()
-        runner = JobRunner(store=store)
+        runner = JobRunner()
         upload = make_upload(tmp_path)
         job = submit_queued_job(runner, store, pool, upload)
         await runner.drain()
@@ -244,10 +159,10 @@ class TestJobRunnerFailures:
 
     async def test_skips_parse_when_job_gone_before_start(self, tmp_path: Path) -> None:
         """Delete-before-start race: mark_running refuses, nothing parses."""
-        store = RecordingJobStore()
+        store = FakeJobStore()
         pool = GatedPool()
         pool.release.set()
-        runner = JobRunner(store=store)
+        runner = JobRunner()
         upload = make_upload(tmp_path)
         job = create_job(
             token_id="feed0001", output=OutputFormat.MARKDOWN, ocr=OcrMode.AUTO
@@ -258,6 +173,7 @@ class TestJobRunnerFailures:
             path=upload,
             output=job.output,
             ocr=job.ocr,
+            store=store,
             pool=pool,
         )
         await runner.drain()
@@ -268,9 +184,9 @@ class TestJobRunnerFailures:
         self, tmp_path: Path
     ) -> None:
         """Delete-vs-complete race: a late result must not resurrect the job."""
-        store = RecordingJobStore()
+        store = FakeJobStore()
         pool = GatedPool()
-        runner = JobRunner(store=store)
+        runner = JobRunner()
         upload = make_upload(tmp_path)
         job = submit_queued_job(runner, store, pool, upload)
         await pool.started.wait()
@@ -282,14 +198,53 @@ class TestJobRunnerFailures:
         assert not upload.exists()
 
 
+class TestJobRunnerStoreFailures:
+    """A failing store must never leak an exception out of the job task."""
+
+    async def test_mark_done_failure_marks_job_failed_best_effort(
+        self, tmp_path: Path
+    ) -> None:
+        """The parse outcome is lost, but the job still goes terminal."""
+        store = MarkDoneBrokenStore()
+        pool = GatedPool()
+        pool.release.set()
+        runner = JobRunner()
+        upload = make_upload(tmp_path)
+        job = submit_queued_job(runner, store, pool, upload)
+        task = runner.task_for(job.id)
+        assert task is not None
+        # Awaiting the task directly re-raises anything that escaped _run.
+        await task
+        failed = store.jobs[job.id]
+        assert failed.status is JobStatus.FAILED
+        assert failed.failure_detail == INTERNAL_ERROR_DETAIL
+        assert not upload.exists()
+
+    async def test_fully_broken_store_never_raises_out_of_the_task(
+        self, tmp_path: Path
+    ) -> None:
+        """Even the best-effort failure write failing stays contained."""
+        store = FullyBrokenStore()
+        pool = GatedPool()
+        pool.release.set()
+        runner = JobRunner()
+        upload = make_upload(tmp_path)
+        job = submit_queued_job(runner, store, pool, upload)
+        task = runner.task_for(job.id)
+        assert task is not None
+        await task  # must not raise
+        assert store.jobs[job.id].status is JobStatus.QUEUED
+        assert not upload.exists()
+
+
 class TestJobRunnerCancellation:
     async def test_cancel_leaves_store_state_alone_and_deletes_upload(
         self, tmp_path: Path
     ) -> None:
         """Shutdown story: cancelled jobs stay running for the #19 sweep."""
-        store = RecordingJobStore()
+        store = FakeJobStore()
         pool = GatedPool()
-        runner = JobRunner(store=store)
+        runner = JobRunner()
         upload = make_upload(tmp_path)
         job = submit_queued_job(runner, store, pool, upload)
         await pool.started.wait()
@@ -301,9 +256,9 @@ class TestJobRunnerCancellation:
         assert not upload.exists()
 
     async def test_aclose_cancels_all_in_flight_tasks(self, tmp_path: Path) -> None:
-        store = RecordingJobStore()
+        store = FakeJobStore()
         pool = GatedPool()
-        runner = JobRunner(store=store)
+        runner = JobRunner()
         uploads: list[Path] = []
         for index in range(3):
             subdir = tmp_path / f"job{index}"

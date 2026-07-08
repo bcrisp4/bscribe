@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -17,6 +17,7 @@ from bscribe.domain.models import (
     Token,
 )
 from bscribe.domain.ports import JobStorePort, ParserPort, TokenStorePort
+from tests.unit.fakes import FakeJobStore
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -70,90 +71,6 @@ class FakeTokenStore:
         return self.tokens.pop(token_id, None) is not None
 
 
-@dataclass
-class FakeJobStore:
-    """In-memory JobStorePort implementation for domain-level tests.
-
-    Replicates the store contract: token scoping on reads/deletes,
-    compare-and-set transition guards, and the metadata/result split
-    (results live beside jobs, reachable only via ``get_result``).
-    """
-
-    jobs: dict[str, Job] = field(default_factory=dict[str, "Job"])
-    results: dict[str, ParsedDocument] = field(
-        default_factory=dict[str, "ParsedDocument"]
-    )
-
-    def add(self, job: Job) -> None:
-        if job.id in self.jobs:
-            # The adapter raises on the duplicate PRIMARY KEY; mirroring
-            # that (rather than upserting) keeps the fake honest.
-            msg = f"duplicate job id: {job.id}"
-            raise ValueError(msg)
-        self.jobs[job.id] = job
-
-    def get(self, job_id: str, token_id: str) -> Job | None:
-        job = self.jobs.get(job_id)
-        return job if job is not None and job.token_id == token_id else None
-
-    def get_result(self, job_id: str, token_id: str) -> ParsedDocument | None:
-        job = self.get(job_id, token_id)
-        if job is None or job.status is not JobStatus.DONE:
-            return None
-        return self.results[job_id]
-
-    def list_for_token(
-        self, token_id: str, *, status: JobStatus | None = None
-    ) -> list[Job]:
-        matches = [
-            job
-            for job in self.jobs.values()
-            if job.token_id == token_id
-            # .value on both sides: a raw string passed as status fails
-            # here exactly as it would against the SQLite adapter.
-            and (status is None or job.status.value == status.value)
-        ]
-        return sorted(matches, key=lambda j: (j.created_at, j.id), reverse=True)
-
-    def mark_running(self, job_id: str) -> bool:
-        job = self.jobs.get(job_id)
-        if job is None or job.status is not JobStatus.QUEUED:
-            return False
-        self.jobs[job_id] = replace(
-            job, status=JobStatus.RUNNING, started_at=datetime.now(tz=UTC)
-        )
-        return True
-
-    def mark_done(self, job_id: str, result: ParsedDocument) -> bool:
-        job = self.jobs.get(job_id)
-        if job is None or job.status is not JobStatus.RUNNING:
-            return False
-        self.jobs[job_id] = replace(
-            job, status=JobStatus.DONE, finished_at=datetime.now(tz=UTC)
-        )
-        self.results[job_id] = result
-        return True
-
-    def mark_failed(self, job_id: str, detail: str) -> bool:
-        job = self.jobs.get(job_id)
-        if job is None or job.status not in (JobStatus.QUEUED, JobStatus.RUNNING):
-            return False
-        self.jobs[job_id] = replace(
-            job,
-            status=JobStatus.FAILED,
-            finished_at=datetime.now(tz=UTC),
-            failure_detail=detail,
-        )
-        return True
-
-    def delete(self, job_id: str, token_id: str) -> bool:
-        if self.get(job_id, token_id) is None:
-            return False
-        del self.jobs[job_id]
-        self.results.pop(job_id, None)
-        return True
-
-
 class TestJobStorePortConformance:
     """JobStorePort is runtime-checkable: structural isinstance checks work."""
 
@@ -177,6 +94,21 @@ class TestJobStorePortConformance:
         )
         store.add(job)
         with pytest.raises(ValueError, match="duplicate"):
+            store.add(job)
+
+    def test_fake_add_rejects_non_queued_job_like_the_adapter(self) -> None:
+        """The port's queued-only add contract must hold in the fake too."""
+        store = FakeJobStore()
+        job = Job(
+            id="abcd1234abcd1234",
+            token_id="feed0001",
+            output=OutputFormat.MARKDOWN,
+            ocr=OcrMode.AUTO,
+            status=JobStatus.FAILED,
+            created_at=datetime(2026, 7, 7, tzinfo=UTC),
+            failure_detail="timeout",
+        )
+        with pytest.raises(ValueError, match="queued"):
             store.add(job)
 
     def test_object_without_methods_does_not_satisfy_port(self) -> None:

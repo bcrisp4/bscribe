@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -25,6 +25,7 @@ from bscribe.domain.models import (
 from bscribe.domain.tokens import mint_token
 from bscribe.errors import JOB_FAILED_NO_RESULT_DETAIL, UNPARSEABLE_DETAIL
 from bscribe.settings import Settings
+from tests.unit.fakes import FakeJobStore, GatedPool
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -36,39 +37,6 @@ if TYPE_CHECKING:
 
 
 PDF_BYTES = b"%PDF-1.4 fake body"
-
-
-class GatedPool:
-    """Stands in for WorkerPool on app.state — the runner's parse seam.
-
-    ``started``/``release`` make the queued → running → terminal lifecycle
-    observable deterministically; ``exc`` drives the failure paths.
-    """
-
-    def __init__(
-        self,
-        *,
-        result: ParsedDocument | None = None,
-        exc: Exception | None = None,
-    ) -> None:
-        self._result = result or ParsedDocument(
-            content="# Heading", pages=3, duration_ms=41.7
-        )
-        self._exc = exc
-        self.started = asyncio.Event()
-        self.release = asyncio.Event()
-        self.calls: list[Path] = []
-
-    async def parse(
-        self, path: Path, *, output: OutputFormat, ocr: OcrMode
-    ) -> ParsedDocument:
-        del output, ocr
-        self.calls.append(path)
-        self.started.set()
-        await self.release.wait()
-        if self._exc is not None:
-            raise self._exc
-        return self._result
 
 
 @pytest.fixture(autouse=True)
@@ -125,14 +93,8 @@ def seed_job(
     store: JobStorePort = app.state.job_store
     job = create_job(token_id=token_id, output=OutputFormat.MARKDOWN, ocr=OcrMode.AUTO)
     if created_at is not None:
-        job = Job(
-            id=job.id,
-            token_id=job.token_id,
-            output=job.output,
-            ocr=job.ocr,
-            status=job.status,
-            created_at=created_at,
-        )
+        # replace() re-runs __post_init__, so validation still applies.
+        job = replace(job, created_at=created_at)
     store.add(job)
     if status is not JobStatus.QUEUED:
         store.mark_running(job.id)
@@ -251,6 +213,45 @@ class TestSubmitJob:
         assert response.status_code == 415
         assert app.state.job_store.list_for_token(token.id) == []
         assert scratch_files(tmp_path) == []
+
+    async def test_swapped_job_store_is_used_by_runner_too(
+        self, tmp_path: Path
+    ) -> None:
+        """The factory comment invites swapping app.state.job_store before
+        serving; the runner must honor the swap (no frozen store snapshot),
+        or submitted jobs sit queued in one store while parsed in another."""
+        app, pool = make_app(tmp_path)
+        pool.release.set()
+        fake_store = FakeJobStore()
+        app.state.job_store = fake_store
+        secret = issue_token(app)[1]
+        async with make_client(app) as client:
+            response = await submit(client, secret)
+            await app.state.job_runner.drain()
+        job_id = response.json()["id"]
+        assert fake_store.jobs[job_id].status is JobStatus.DONE
+
+    async def test_store_add_failure_leaks_no_scratch_file_or_job(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The handoff to the runner is unconditional, so even a failed add
+        leaves no scratch file behind (the task finds no row and cleans up).
+        (Starlette's catch-all handler produces the 500 in production but
+        re-raises under ASGITransport, hence pytest.raises here.)"""
+        app = make_app(tmp_path)[0]
+        token, secret = issue_token(app)
+
+        def broken_add(job: Job) -> None:
+            del job
+            raise RuntimeError("database is locked")
+
+        monkeypatch.setattr(app.state.job_store, "add", broken_add)
+        async with make_client(app) as client:
+            with pytest.raises(RuntimeError, match="database is locked"):
+                await submit(client, secret)
+            await app.state.job_runner.drain()
+        assert scratch_files(tmp_path) == []
+        assert app.state.job_store.list_for_token(token.id) == []
 
     async def test_oversized_upload_is_413_and_creates_nothing(
         self, tmp_path: Path

@@ -75,10 +75,20 @@ class JobStorePort(Protocol):
     """
 
     def add(self, job: Job) -> None:
-        """Persist a new job.
+        """Persist a freshly queued job (as minted by ``create_job``).
+
+        Only ``queued`` jobs may enter this way — every later state is
+        reached through the ``mark_*`` transitions. This stands in for the
+        old ``Job``-level "result iff done" invariant: since ``Job`` is
+        metadata-only, admitting a terminal snapshot here would create a
+        ``done`` row that never had a result to store.
 
         Args:
-            job: The job record to store; ``id`` must be unique.
+            job: The job record to store; ``id`` must be unique and
+                ``status`` must be ``queued``.
+
+        Raises:
+            ValueError: ``job`` is not ``queued``.
         """
         ...
 

@@ -81,8 +81,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.job_store = SqliteJobStore(settings.db_path)
     # Factory-time too (the runner is loop-agnostic until its first submit),
     # so ASGITransport tests — which never run the lifespan — get a working
-    # runner alongside whatever pool they swap in.
-    app.state.job_runner = JobRunner(store=app.state.job_store)
+    # runner. It deliberately holds no store or pool: the submitting
+    # endpoint passes the pair it resolved per request, so swapping either
+    # on app.state can never split writes between two stores.
+    app.state.job_runner = JobRunner()
     # Ensure the upload scratch dir exists once here rather than on every
     # request. The M2 startup sweep (docs/design.md — Startup sweep) will also
     # wipe it; until then per-request cleanup (see api.convert) is the story.

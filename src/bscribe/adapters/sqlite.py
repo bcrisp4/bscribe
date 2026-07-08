@@ -329,15 +329,24 @@ class SqliteJobStore:
         _ensure_schema(db_path)
 
     def add(self, job: Job) -> None:
-        """Persist a new job.
+        """Persist a freshly queued job.
 
         Args:
-            job: The job record to store; ``id`` must be unique.
+            job: The job record to store; ``id`` must be unique and
+                ``status`` must be ``queued``.
 
         Raises:
+            ValueError: ``job`` is not ``queued``. Since ``Job`` carries no
+                result, admitting a terminal snapshot would create states
+                the transitions can never produce — most dangerously a
+                ``done`` row with no stored result, which ``get_result``
+                treats as external corruption.
             sqlite3.IntegrityError: Duplicate id (astronomically rare with
                 generated values — see docs/adr/0002).
         """
+        if job.status is not JobStatus.QUEUED:
+            msg = f"job {job.id}: add requires a queued job, got {job.status.value}"
+            raise ValueError(msg)
         # Timestamps are normalized to UTC before serializing: newest-first
         # ordering compares the isoformat TEXT lexicographically, which is
         # only chronological when every stored value shares one offset.

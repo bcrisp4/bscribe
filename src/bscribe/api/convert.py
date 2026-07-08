@@ -14,21 +14,16 @@ checks run, so they gate processing, not receipt.
 from __future__ import annotations
 
 from typing import Annotated
-from uuid import uuid4
 
-import structlog
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 
-from bscribe.api.schemas import ConvertMetadata, ConvertResponse
+from bscribe.api.schemas import ConvertResponse
+from bscribe.api.staging import stage_upload
 from bscribe.auth import require_token
-from bscribe.domain.formats import supported_extension
 
 # Token appears only in an annotation, but FastAPI resolves route
 # annotations at runtime (get_type_hints), so it must be a runtime import.
 from bscribe.domain.models import OcrMode, OutputFormat, Token
-from bscribe.uploads import spool_upload
-
-logger = structlog.get_logger()
 
 router = APIRouter(tags=["convert"])
 
@@ -45,33 +40,13 @@ async def convert(
     settings = request.app.state.settings
     pool = request.app.state.worker_pool
 
-    # 415 before staging to scratch: liteparse routes by extension, so an
-    # unsupported one would otherwise surface as a generic parse failure.
-    ext = supported_extension(file.filename)
-    # scratch_dir is created once in create_app. Random name, extension
-    # preserved (liteparse dispatches on it); the caller's filename never
-    # lands in the on-disk path.
-    dest = settings.scratch_dir / f"{uuid4().hex}{ext}"
-    # Filename only at DEBUG (Privacy). The token id + label attribute the
-    # request (design.md — Security: label attributes requests); never the
-    # secret, which the Token model does not carry.
-    logger.debug(
-        "convert_upload",
-        filename=file.filename,
-        token_id=token.id,
-        token_label=token.label,
+    dest = await stage_upload(
+        file, settings=settings, token=token, log_event="convert_upload"
     )
     try:
-        await spool_upload(file, dest=dest, max_bytes=settings.max_upload_bytes)
         result = await pool.parse(dest, output=output, ocr=ocr)
     finally:
         # Documents transit; delete on success and on every failure.
         dest.unlink(missing_ok=True)
 
-    return ConvertResponse(
-        output=output,
-        content=result.content,
-        metadata=ConvertMetadata(
-            pages=result.pages, duration_ms=round(result.duration_ms)
-        ),
-    )
+    return ConvertResponse.from_result(output, result)

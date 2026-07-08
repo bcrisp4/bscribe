@@ -21,6 +21,7 @@ Two contracts worth stating:
   exception messages may quote document internals (liteparse's
   ``ParseError``); the sync path scrubs them via the error handlers in
   :mod:`bscribe.errors`, and this module is the async path's equivalent.
+  The full detail vocabulary is defined in :mod:`bscribe.errors`.
 
 Shutdown cancels every in-flight task (killing running workers) but leaves
 the jobs ``queued``/``running`` in the store: the startup sweep (#19) marks
@@ -40,7 +41,12 @@ from bscribe.domain.errors import (
     JobTimeoutError,
     WorkerCrashedError,
 )
-from bscribe.errors import TIMEOUT_DETAIL, UNPARSEABLE_DETAIL
+from bscribe.errors import (
+    INTERNAL_ERROR_DETAIL,
+    TIMEOUT_DETAIL,
+    UNPARSEABLE_DETAIL,
+    WORKER_CRASHED_DETAIL,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -49,11 +55,6 @@ if TYPE_CHECKING:
     from bscribe.domain.ports import JobStorePort
 
 logger = structlog.get_logger()
-
-# Runner-only failure details (the sync path's WorkerCrashedError body is a
-# generic 500, not a stored failure reason, so these have no errors.py twin).
-WORKER_CRASHED_DETAIL = "worker crashed"
-INTERNAL_ERROR_DETAIL = "internal error"
 
 
 class ParsePool(Protocol):
@@ -67,21 +68,14 @@ class ParsePool(Protocol):
 class JobRunner:
     """Runs submitted jobs as asyncio tasks on the shared worker pool.
 
-    Owns no pool: the pool is lifespan-owned (and test-swapped) on
-    ``app.state``, so the submitting endpoint passes it per call. The
-    store, by contrast, is fixed at construction — the runner is built
-    beside it at factory time in ``create_app``.
+    Owns neither the pool nor the store: both live on ``app.state`` (the
+    pool is lifespan-owned and test-swapped, the store swappable at any
+    point before serving), so the submitting endpoint passes the pair it
+    resolved for its request. Holding either here would freeze a snapshot
+    that could diverge from what the endpoints use.
     """
 
-    def __init__(self, *, store: JobStorePort) -> None:
-        """Wire the runner to the job store it records transitions in.
-
-        Args:
-            store: Persists lifecycle transitions; called via
-                ``asyncio.to_thread`` (the port contract keeps SQLite off
-                the event loop — docs/adr/0002).
-        """
-        self._store = store
+    def __init__(self) -> None:
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
     def submit(
@@ -91,6 +85,7 @@ class JobRunner:
         path: Path,
         output: OutputFormat,
         ocr: OcrMode,
+        store: JobStorePort,
         pool: ParsePool,
     ) -> None:
         """Start a background task that runs the job to a terminal state.
@@ -104,10 +99,20 @@ class JobRunner:
             path: Staged upload to parse; deleted when the task finishes.
             output: Requested output format.
             ocr: Requested OCR mode.
+            store: Records lifecycle transitions; called via
+                ``asyncio.to_thread`` (the port contract keeps SQLite off
+                the event loop — docs/adr/0002).
             pool: The shared worker pool to parse on.
         """
         task = asyncio.create_task(
-            self._run(job_id=job_id, path=path, output=output, ocr=ocr, pool=pool),
+            self._run(
+                job_id=job_id,
+                path=path,
+                output=output,
+                ocr=ocr,
+                store=store,
+                pool=pool,
+            ),
             name=f"bscribe-job-{job_id}",
         )
         self._tasks[job_id] = task
@@ -149,56 +154,93 @@ class JobRunner:
         path: Path,
         output: OutputFormat,
         ocr: OcrMode,
+        store: JobStorePort,
         pool: ParsePool,
     ) -> None:
         """Drive one job to a terminal state; never lets an exception escape
-        (an unretrieved task exception would only surface as loop noise)."""
+        (an unretrieved task exception would only surface as loop noise,
+        and the job would silently stay non-terminal until a restart)."""
         try:
-            if not await asyncio.to_thread(self._store.mark_running, job_id):
-                # Deleted (or otherwise transitioned) between add and task
-                # start — nothing to run. The finally still cleans up.
-                logger.info("job_skipped", job_id=job_id)
-                return
-            logger.info("job_running", job_id=job_id)
-            # CancelledError is a BaseException, so it propagates past these
-            # handlers by design: #18's DELETE and shutdown own the state of
-            # cancelled jobs; the finally below still removes the upload.
+            await self._drive(
+                job_id=job_id, path=path, output=output, ocr=ocr, store=store, pool=pool
+            )
+        except Exception as exc:
+            # _drive contains every parse failure, so reaching here means a
+            # *store* call failed (e.g. a transient SQLite error). Type name
+            # only, and best-effort mark the job failed so it does not sit
+            # non-terminal until restart if the store recovers.
+            logger.error(
+                "job_lifecycle_error", job_id=job_id, error_type=type(exc).__name__
+            )
             try:
-                result = await pool.parse(path, output=output, ocr=ocr)
-            except DocumentUnparseableError:
-                await self._fail(job_id, UNPARSEABLE_DETAIL)
-            except JobTimeoutError:
-                await self._fail(job_id, TIMEOUT_DETAIL)
-            except WorkerCrashedError:
-                await self._fail(job_id, WORKER_CRASHED_DETAIL)
-            except Exception as exc:
-                # Type name only — the message may quote document internals
-                # (see module docstring and bscribe.errors).
-                logger.error(
-                    "job_unexpected_error",
-                    job_id=job_id,
-                    error_type=type(exc).__name__,
+                await asyncio.to_thread(
+                    store.mark_failed, job_id, INTERNAL_ERROR_DETAIL
                 )
-                await self._fail(job_id, INTERNAL_ERROR_DETAIL)
-            else:
-                if await asyncio.to_thread(self._store.mark_done, job_id, result):
-                    logger.info(
-                        "job_done",
-                        job_id=job_id,
-                        pages=result.pages,
-                        duration_ms=round(result.duration_ms),
-                    )
-                else:
-                    # Deleted mid-parse (a #18 race): drop the result.
-                    logger.info("job_result_discarded", job_id=job_id)
+            except Exception as retry_exc:
+                logger.error(
+                    "job_failure_unrecorded",
+                    job_id=job_id,
+                    error_type=type(retry_exc).__name__,
+                )
         finally:
-            # Documents transit; delete on success and on every failure.
+            # Documents transit; delete on success and on every failure —
+            # including cancellation (CancelledError is a BaseException, so
+            # it skips the handler above and propagates, by design: #18's
+            # DELETE and shutdown own the state of cancelled jobs).
             # Blocking unlink on purpose (same as api.convert): a scratch
             # file unlink is sub-ms, and an await here would need
             # cancellation shielding to run reliably during aclose().
             path.unlink(missing_ok=True)  # noqa: ASYNC240
 
-    async def _fail(self, job_id: str, detail: str) -> None:
+    async def _drive(
+        self,
+        *,
+        job_id: str,
+        path: Path,
+        output: OutputFormat,
+        ocr: OcrMode,
+        store: JobStorePort,
+        pool: ParsePool,
+    ) -> None:
+        """The lifecycle proper: mark running, parse, record the outcome."""
+        if not await asyncio.to_thread(store.mark_running, job_id):
+            # Deleted (or otherwise transitioned) between add and task
+            # start — nothing to run. Also the benign end state when the
+            # submitting request failed after the handoff (the row may
+            # never have been committed).
+            logger.info("job_skipped", job_id=job_id)
+            return
+        logger.info("job_running", job_id=job_id)
+        try:
+            result = await pool.parse(path, output=output, ocr=ocr)
+        except DocumentUnparseableError:
+            await self._fail(store, job_id, UNPARSEABLE_DETAIL)
+        except JobTimeoutError:
+            await self._fail(store, job_id, TIMEOUT_DETAIL)
+        except WorkerCrashedError:
+            await self._fail(store, job_id, WORKER_CRASHED_DETAIL)
+        except Exception as exc:
+            # Type name only — the message may quote document internals
+            # (see module docstring and bscribe.errors).
+            logger.error(
+                "job_unexpected_error",
+                job_id=job_id,
+                error_type=type(exc).__name__,
+            )
+            await self._fail(store, job_id, INTERNAL_ERROR_DETAIL)
+        else:
+            if await asyncio.to_thread(store.mark_done, job_id, result):
+                logger.info(
+                    "job_done",
+                    job_id=job_id,
+                    pages=result.pages,
+                    duration_ms=round(result.duration_ms),
+                )
+            else:
+                # Deleted mid-parse (a #18 race): drop the result.
+                logger.info("job_result_discarded", job_id=job_id)
+
+    async def _fail(self, store: JobStorePort, job_id: str, detail: str) -> None:
         """Record a failure with a fixed, content-free detail string."""
-        if await asyncio.to_thread(self._store.mark_failed, job_id, detail):
+        if await asyncio.to_thread(store.mark_failed, job_id, detail):
             logger.info("job_failed", job_id=job_id, detail=detail)

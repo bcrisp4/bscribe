@@ -40,11 +40,16 @@ PROBLEM_JSON_MEDIA_TYPE = "application/problem+json"
 # emit an identical 413 body instead of two copy-pasted literals.
 UPLOAD_TOO_LARGE_DETAIL = "upload exceeds maximum size"
 
-# Shared with the job runner (bscribe.runner), which translates the same
-# parse failures into a failed job's failure_detail instead of an HTTP
-# status — one definition keeps sync responses and job records in step.
+# The complete failure_detail vocabulary for async jobs lives here, one
+# audit site for the privacy rule that details are fixed strings — never
+# ``str(exc)``. The first two are shared with the sync path's status
+# mapping below; the last two are used only by the job runner
+# (bscribe.runner) — the sync path's equivalent responses are generic 500
+# bodies, not stored failure reasons.
 UNPARSEABLE_DETAIL = "document could not be parsed"
 TIMEOUT_DETAIL = "timeout"
+WORKER_CRASHED_DETAIL = "worker crashed"
+INTERNAL_ERROR_DETAIL = "internal error"
 
 # The 409 body for a result fetch on a failed job (GET /v1/jobs/{id}/result).
 # Deliberately not composed with the job's failure_detail: callers read the
