@@ -129,6 +129,36 @@ class TestJobRunnerHappyPath:
         assert runner.task_for(job.id) is None
 
 
+class TestJobRunnerResubmission:
+    async def test_stale_task_callback_does_not_evict_newer_mapping(
+        self, tmp_path: Path
+    ) -> None:
+        """Job ids are unique today, but a future resubmission path (#18)
+        must not have an old task's done-callback evict the new mapping."""
+        store = FakeJobStore()
+        pool = GatedPool()
+        runner = JobRunner()
+        upload = make_upload(tmp_path)
+        job = submit_queued_job(runner, store, pool, upload)
+        first = runner.task_for(job.id)
+        assert first is not None
+        runner.submit(
+            job_id=job.id,
+            path=upload,
+            output=job.output,
+            ocr=job.ocr,
+            store=store,
+            pool=pool,
+        )
+        second = runner.task_for(job.id)
+        assert second is not first
+        first.cancel()
+        await asyncio.gather(first, return_exceptions=True)
+        await asyncio.sleep(0)  # let the done-callback fire
+        assert runner.task_for(job.id) is second
+        await runner.aclose()
+
+
 class TestJobRunnerFailures:
     @pytest.mark.parametrize(
         ("exc", "expected_detail"),

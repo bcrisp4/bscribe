@@ -116,7 +116,16 @@ class JobRunner:
             name=f"bscribe-job-{job_id}",
         )
         self._tasks[job_id] = task
-        task.add_done_callback(lambda _: self._tasks.pop(job_id, None))
+
+        def _discard(done_task: asyncio.Task[None]) -> None:
+            # Identity-guarded: if the mapping was ever re-pointed at a
+            # newer task for the same id, a stale task's callback must not
+            # evict it (job ids are unique today, so this is a guard for
+            # future resubmission paths, e.g. #18).
+            if self._tasks.get(job_id) is done_task:
+                del self._tasks[job_id]
+
+        task.add_done_callback(_discard)
 
     def task_for(self, job_id: str) -> asyncio.Task[None] | None:
         """Return the live task for a job, if any (cancellation hook, #18).
@@ -143,7 +152,8 @@ class JobRunner:
         sweep (#19) marks them failed on the next boot (see module
         docstring).
         """
-        for task in self._tasks.values():
+        # Snapshot like drain(): callbacks mutate _tasks as tasks settle.
+        for task in list(self._tasks.values()):
             task.cancel()
         await self.drain()
 
@@ -157,9 +167,11 @@ class JobRunner:
         store: JobStorePort,
         pool: ParsePool,
     ) -> None:
-        """Drive one job to a terminal state; never lets an exception escape
-        (an unretrieved task exception would only surface as loop noise,
-        and the job would silently stay non-terminal until a restart)."""
+        """Drive one job to a terminal state; no exception except
+        ``CancelledError`` escapes (an unretrieved task exception would only
+        surface as loop noise, and the job would silently stay non-terminal
+        until a restart). Cancellation propagates by design — #18's DELETE
+        and shutdown own cancelled jobs' state."""
         try:
             await self._drive(
                 job_id=job_id, path=path, output=output, ocr=ocr, store=store, pool=pool
