@@ -158,8 +158,9 @@ class WorkerPool:
             WorkerCrashedError: The worker process died mid-parse, raised
                 an unexpected error, or the pool itself broke; the pool is
                 respawned or rebuilt.
-            asyncio.CancelledError: The awaiting task was cancelled; the
-                running worker is killed (real cancellation).
+            asyncio.CancelledError: The awaiting task was cancelled; a
+                running worker is killed (real cancellation), a job still
+                queued inside the pool is dropped without running.
         """
         if self._closed:
             raise RuntimeError("worker pool is closed")
@@ -192,10 +193,11 @@ class WorkerPool:
         except asyncio.CancelledError:
             # asyncio.wrap_future already chains cancellation to the pebble
             # future; calling cancel() again is an idempotent way to learn
-            # whether a running worker was actually killed (False = the job
-            # had already finished), so the metric counts only real kills.
-            # (pebble leaves ProcessFuture.cancel unannotated, hence the
-            # mypy ignore.)
+            # whether the cancellation took effect — False only when the job
+            # had already finished. True covers both a killed running worker
+            # and a pool-queued job dropped before dispatch, so the metric
+            # counts effective cancellations, not just kills. (pebble leaves
+            # ProcessFuture.cancel unannotated, hence the mypy ignore.)
             if future.cancel():  # type: ignore[no-untyped-call]
                 self.metrics.cancellations += 1
                 logger.warning("job_cancelled")

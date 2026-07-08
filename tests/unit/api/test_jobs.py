@@ -501,16 +501,7 @@ class TestDeleteJob:
         assert response.content == b""
         assert followup.status_code == 404
         assert listed.json() == {"jobs": []}
-
-    async def test_done_job_purges_stored_result(self, tmp_path: Path) -> None:
-        app = make_app(tmp_path)[0]
-        token, secret = issue_token(app)
-        job = seed_job(app, token.id, status=JobStatus.DONE)
-        async with make_client(app) as client:
-            response = await client.delete(
-                f"/v1/jobs/{job.id}", headers={"Authorization": f"Bearer {secret}"}
-            )
-        assert response.status_code == 204
+        # The DONE case seeds a stored result; delete purges it with the row.
         store: JobStorePort = app.state.job_store
         assert store.get_result(job.id, token.id) is None
 

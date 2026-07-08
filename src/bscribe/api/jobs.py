@@ -13,8 +13,7 @@ string, so the two cases are indistinguishable by construction
 (docs/design.md — Ownership). Status and list reads return metadata only;
 the stored content is read exclusively by the result endpoint
 (``JobStorePort``'s metadata/result split). ``DELETE`` cancels and purges
-in any state — cancelling the runner task is what kills a running job's
-worker process.
+in any state.
 
 The GET handlers are sync ``def`` on purpose: FastAPI runs them on the
 threadpool, which is where the SQLite-backed store must be called from
@@ -139,7 +138,7 @@ async def delete_job(
 
     The row (and any stored result) is purged before the response; the
     in-flight task, if any, is cancelled fire-and-forget — ``WorkerPool.parse``
-    turns the cancellation into a SIGKILL of a running worker, and the
+    turns the cancellation into killing the running worker process, and the
     runner's cleanup deletes the scratch upload. Deleting the row first makes
     the task's late ``mark_*`` calls safe no-ops (the races the runner
     already handles), so no per-state branching is needed here.
@@ -149,11 +148,11 @@ async def delete_job(
     if not await asyncio.to_thread(store.delete, job_id, token.id):
         raise _job_not_found()
     task = runner.task_for(job_id)
-    if task is not None:
-        task.cancel()
-    logger.info(
-        "job_deleted", job_id=job_id, token_id=token.id, cancelled=task is not None
-    )
+    # cancel() returns False for a task that already finished (one can linger
+    # in the runner until its done-callback runs) — log what actually
+    # happened, not mere task presence.
+    cancelled = task is not None and task.cancel()
+    logger.info("job_deleted", job_id=job_id, token_id=token.id, cancelled=cancelled)
     return Response(status_code=204)
 
 
