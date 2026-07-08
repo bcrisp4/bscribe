@@ -74,11 +74,15 @@ class FakeTokenStore:
 class FakeJobStore:
     """In-memory JobStorePort implementation for domain-level tests.
 
-    Replicates the store contract: token scoping on reads/deletes and
-    compare-and-set transition guards.
+    Replicates the store contract: token scoping on reads/deletes,
+    compare-and-set transition guards, and the metadata/result split
+    (results live beside jobs, reachable only via ``get_result``).
     """
 
     jobs: dict[str, Job] = field(default_factory=dict[str, "Job"])
+    results: dict[str, ParsedDocument] = field(
+        default_factory=dict[str, "ParsedDocument"]
+    )
 
     def add(self, job: Job) -> None:
         if job.id in self.jobs:
@@ -91,6 +95,12 @@ class FakeJobStore:
     def get(self, job_id: str, token_id: str) -> Job | None:
         job = self.jobs.get(job_id)
         return job if job is not None and job.token_id == token_id else None
+
+    def get_result(self, job_id: str, token_id: str) -> ParsedDocument | None:
+        job = self.get(job_id, token_id)
+        if job is None or job.status is not JobStatus.DONE:
+            return None
+        return self.results[job_id]
 
     def list_for_token(
         self, token_id: str, *, status: JobStatus | None = None
@@ -119,11 +129,9 @@ class FakeJobStore:
         if job is None or job.status is not JobStatus.RUNNING:
             return False
         self.jobs[job_id] = replace(
-            job,
-            status=JobStatus.DONE,
-            finished_at=datetime.now(tz=UTC),
-            result=result,
+            job, status=JobStatus.DONE, finished_at=datetime.now(tz=UTC)
         )
+        self.results[job_id] = result
         return True
 
     def mark_failed(self, job_id: str, detail: str) -> bool:
@@ -142,6 +150,7 @@ class FakeJobStore:
         if self.get(job_id, token_id) is None:
             return False
         del self.jobs[job_id]
+        self.results.pop(job_id, None)
         return True
 
 

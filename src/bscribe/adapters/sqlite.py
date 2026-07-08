@@ -151,10 +151,12 @@ def _connect(db_path: Path) -> Generator[sqlite3.Connection]:
         conn.close()
 
 
+# Metadata columns only — the result_* columns are deliberately absent so
+# get/list_for_token never read stored content (JobStorePort's
+# metadata/result split); get_result is the one reader of the blob.
 _JOB_COLUMNS = (
     "id, token_id, output, ocr, status, failure_detail,"
-    " created_at, started_at, finished_at,"
-    " result_content, result_pages, result_duration_ms"
+    " created_at, started_at, finished_at"
 )
 
 
@@ -174,16 +176,12 @@ def _row_to_job(
         str,
         str | None,
         str | None,
-        str | None,
-        int | None,
-        float | None,
     ],
 ) -> Job:
     """Map a jobs row (in ``_JOB_COLUMNS`` order) back to a :class:`Job`.
 
     Raises:
-        ValueError: The row violates a Job invariant — result columns
-            partially populated, or a state combination
+        ValueError: The row violates a Job invariant — a state combination
             :meth:`Job.__post_init__` rejects. Only reachable through
             external edits (the operator's sanctioned debug path is raw
             SQLite); the message carries the job id, never stored content.
@@ -198,23 +196,7 @@ def _row_to_job(
         created_at,
         started_at,
         finished_at,
-        result_content,
-        result_pages,
-        result_duration_ms,
     ) = row
-    result = None
-    if result_content is not None:
-        # mark_done writes all three columns atomically; a partial set means
-        # the row was edited outside the store. Fail loudly — an explicit
-        # raise, not an assert, so the guard survives python -O.
-        if result_pages is None or result_duration_ms is None:
-            msg = f"job {job_id}: result columns partially populated"
-            raise ValueError(msg)
-        result = ParsedDocument(
-            content=result_content,
-            pages=result_pages,
-            duration_ms=result_duration_ms,
-        )
     return Job(
         id=job_id,
         token_id=token_id,
@@ -229,7 +211,6 @@ def _row_to_job(
             datetime.fromisoformat(finished_at) if finished_at is not None else None
         ),
         failure_detail=failure_detail,
-        result=result,
     )
 
 
@@ -361,10 +342,12 @@ class SqliteJobStore:
         # ordering compares the isoformat TEXT lexicographically, which is
         # only chronological when every stored value shares one offset.
         # (Job rejects naive datetimes at construction.)
+        # Metadata columns only; the result_* columns start NULL and are
+        # written solely by mark_done.
         with _connect(self._db_path) as conn:
             conn.execute(
                 f"INSERT INTO jobs ({_JOB_COLUMNS})"  # noqa: S608 - column list constant
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     job.id,
                     job.token_id,
@@ -375,9 +358,6 @@ class SqliteJobStore:
                     _to_utc_iso(job.created_at),
                     _to_utc_iso(job.started_at) if job.started_at else None,
                     _to_utc_iso(job.finished_at) if job.finished_at else None,
-                    job.result.content if job.result else None,
-                    job.result.pages if job.result else None,
-                    job.result.duration_ms if job.result else None,
                 ),
             )
 
@@ -399,6 +379,44 @@ class SqliteJobStore:
                 (job_id, token_id),
             ).fetchone()
         return _row_to_job(row) if row is not None else None
+
+    def get_result(self, job_id: str, token_id: str) -> ParsedDocument | None:
+        """Fetch a done job's stored result, owned by ``token_id``.
+
+        The one read path that touches the result columns (JobStorePort's
+        metadata/result split). The ``status = 'done'`` predicate lives in
+        the SQL so a non-done row can never leak a partial result.
+
+        Args:
+            job_id: The job's id.
+            token_id: The calling token's id — the ownership scope.
+
+        Returns:
+            The stored result, or ``None`` for an unknown id, another
+            token's job, or any non-``done`` status.
+
+        Raises:
+            ValueError: The done row's result columns are incomplete —
+                only reachable through external edits (the operator's
+                sanctioned debug path is raw SQLite); the message carries
+                the job id, never stored content.
+        """
+        with _connect(self._db_path) as conn:
+            row = conn.execute(
+                "SELECT result_content, result_pages, result_duration_ms"
+                " FROM jobs WHERE id = ? AND token_id = ? AND status = ?",
+                (job_id, token_id, JobStatus.DONE.value),
+            ).fetchone()
+        if row is None:
+            return None
+        content, pages, duration_ms = row
+        # mark_done writes all three columns atomically; NULLs on a done row
+        # mean it was edited outside the store. Fail loudly — an explicit
+        # raise, not an assert, so the guard survives python -O.
+        if content is None or pages is None or duration_ms is None:
+            msg = f"job {job_id}: result columns incomplete on done row"
+            raise ValueError(msg)
+        return ParsedDocument(content=content, pages=pages, duration_ms=duration_ms)
 
     def list_for_token(
         self, token_id: str, *, status: JobStatus | None = None

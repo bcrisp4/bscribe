@@ -66,11 +66,16 @@ class JobStatus(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class Job:
-    """An async conversion job (docs/design.md — Interfaces, M2).
+    """An async conversion job's metadata (docs/design.md — Interfaces, M2).
 
     A point-in-time snapshot: instances are immutable, and lifecycle
     transitions happen through job-store methods that stamp timestamps and
     guard the state machine — never by mutating a ``Job``.
+
+    Deliberately metadata-only: a done job's :class:`ParsedDocument` is
+    never carried here — it is written by ``JobStorePort.mark_done`` and
+    read back only through ``JobStorePort.get_result``, so status polling
+    and listings never pay for the stored content blob.
 
     Attributes:
         id: Opaque immutable identifier (see
@@ -88,7 +93,6 @@ class Job:
         finished_at: When the job reached a terminal state; ``None`` before.
         failure_detail: Human-readable failure reason (e.g. ``"timeout"``);
             non-``None`` iff ``status`` is ``FAILED``.
-        result: Parse result; non-``None`` iff ``status`` is ``DONE``.
 
     Raises:
         ValueError: On construction, if the terminal-state invariants above
@@ -105,7 +109,6 @@ class Job:
     started_at: datetime | None = None
     finished_at: datetime | None = None
     failure_detail: str | None = None
-    result: ParsedDocument | None = None
 
     def __post_init__(self) -> None:
         for name in ("created_at", "started_at", "finished_at"):
@@ -113,9 +116,6 @@ class Job:
             if value is not None and value.tzinfo is None:
                 msg = f"{name} must be timezone-aware"
                 raise ValueError(msg)
-        if (self.result is not None) != (self.status is JobStatus.DONE):
-            msg = "result must be set iff status is done"
-            raise ValueError(msg)
         if (self.failure_detail is not None) != (self.status is JobStatus.FAILED):
             msg = "failure_detail must be set iff status is failed"
             raise ValueError(msg)

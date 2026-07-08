@@ -17,6 +17,7 @@ from bscribe.errors import (
     register_error_handlers,
 )
 from bscribe.log import configure_logging
+from bscribe.runner import JobRunner
 from bscribe.settings import Settings
 from bscribe.workers import WorkerPool
 
@@ -42,8 +43,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     Returns:
         A configured FastAPI instance exposing ``/healthz`` and the
-        path-versioned ``/v1`` API (``POST /v1/convert``; async job
-        endpoints arrive in M2).
+        path-versioned ``/v1`` API (``POST /v1/convert`` plus the async
+        ``/v1/jobs`` endpoints).
     """
     if settings is None:
         settings = Settings()
@@ -65,6 +66,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             yield
         finally:
+            # Runner first: cancelling its tasks kills their running
+            # workers via the still-live pool, then the pool tears down.
+            await app.state.job_runner.aclose()
             await pool.aclose()
 
     app = FastAPI(title="bscribe", lifespan=lifespan)
@@ -73,8 +77,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # if missing, and tests can swap in a fake before serving a request.
     # Auth reads it per request via bscribe.auth.require_token.
     app.state.token_store = SqliteTokenStore(settings.db_path)
-    # Same rationale; #17's job endpoints read it per request.
+    # Same rationale; the job endpoints read it per request.
     app.state.job_store = SqliteJobStore(settings.db_path)
+    # Factory-time too (the runner is loop-agnostic until its first submit),
+    # so ASGITransport tests — which never run the lifespan — get a working
+    # runner alongside whatever pool they swap in.
+    app.state.job_runner = JobRunner(store=app.state.job_store)
     # Ensure the upload scratch dir exists once here rather than on every
     # request. The M2 startup sweep (docs/design.md — Startup sweep) will also
     # wipe it; until then per-request cleanup (see api.convert) is the story.
