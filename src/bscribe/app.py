@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
@@ -9,6 +10,7 @@ from typing import TYPE_CHECKING
 import structlog
 from fastapi import FastAPI, Request, Response
 
+from bscribe import maintenance
 from bscribe.adapters.sqlite import SqliteJobStore, SqliteTokenStore
 from bscribe.api import v1_router
 from bscribe.errors import (
@@ -53,20 +55,43 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
-        """Own the worker pool's lifetime. pebble spawns workers lazily on
-        the first job, so startup stays cheap; shutdown kills any running
-        workers (abandoned jobs are the restart story — see docs/design.md,
-        Startup sweep)."""
+        """Own the startup sweep, the worker pool, and the periodic purge
+        task.
+
+        The store is read from ``app.state`` here — not captured at
+        factory time — so a store swapped in after ``create_app`` (as
+        tests do) is the one actually swept and purged; see the
+        factory-time comments below on why ``job_store`` lives on
+        ``app.state`` at all. The sweep runs before the pool exists and
+        before any request is served, so it can never race a freshly
+        submitted job (docs/design.md — Startup sweep). pebble spawns
+        workers lazily on the first job, so pool startup stays cheap;
+        shutdown kills any running workers and stops the purge task.
+        """
+        store = app.state.job_store
+        await asyncio.to_thread(maintenance.startup_sweep, store, settings.scratch_dir)
         pool = WorkerPool(
             worker_count=settings.worker_count,
             job_timeout_seconds=float(settings.job_timeout_seconds),
             worker_max_tasks=settings.worker_max_tasks,
         )
         app.state.worker_pool = pool
+        app.state.purge_task = asyncio.create_task(
+            maintenance.purge_loop(
+                store,
+                ttl_seconds=settings.result_ttl_seconds,
+                interval_seconds=settings.purge_interval_seconds,
+            ),
+            name="bscribe-job-purge",
+        )
         try:
             yield
         finally:
-            # Runner first: cancelling its tasks kills their running
+            # Purge task first: cancel it before tearing down the runner
+            # and pool so it never touches either mid-shutdown.
+            app.state.purge_task.cancel()
+            await asyncio.gather(app.state.purge_task, return_exceptions=True)
+            # Runner next: cancelling its tasks kills their running
             # workers via the still-live pool, then the pool tears down.
             await app.state.job_runner.aclose()
             await pool.aclose()
@@ -86,8 +111,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # on app.state can never split writes between two stores.
     app.state.job_runner = JobRunner()
     # Ensure the upload scratch dir exists once here rather than on every
-    # request. The M2 startup sweep (docs/design.md — Startup sweep) will also
-    # wipe it; until then per-request cleanup (see api.convert) is the story.
+    # request. This mkdir stays for lifespan-less ASGITransport tests,
+    # which never run the lifespan below; the lifespan's startup_sweep
+    # (docs/design.md — Startup sweep) owns wiping it clean at boot.
     settings.scratch_dir.mkdir(parents=True, exist_ok=True)
     register_error_handlers(app)
 

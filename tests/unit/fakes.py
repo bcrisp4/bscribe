@@ -116,6 +116,31 @@ class FakeJobStore:
         self.results.pop(job_id, None)
         return True
 
+    def sweep_incomplete(self, detail: str) -> int:
+        incomplete = [
+            job
+            for job in self.jobs.values()
+            if job.status in (JobStatus.QUEUED, JobStatus.RUNNING)
+        ]
+        for job in incomplete:
+            self.jobs[job.id] = replace(
+                job,
+                status=JobStatus.FAILED,
+                finished_at=datetime.now(tz=UTC),
+                failure_detail=detail,
+            )
+        return len(incomplete)
+
+    def purge_older_than(self, cutoff: datetime) -> int:
+        if cutoff.tzinfo is None:
+            msg = "cutoff must be timezone-aware"
+            raise ValueError(msg)
+        stale = [job_id for job_id, job in self.jobs.items() if job.created_at < cutoff]
+        for job_id in stale:
+            del self.jobs[job_id]
+            self.results.pop(job_id, None)
+        return len(stale)
+
 
 class GatedPool:
     """Stands in for WorkerPool — the runner's/endpoints' parse seam.

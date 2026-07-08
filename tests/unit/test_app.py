@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import TYPE_CHECKING
 
@@ -12,12 +13,17 @@ from httpx import ASGITransport
 
 from bscribe.adapters.sqlite import SqliteJobStore
 from bscribe.app import create_app
+from bscribe.domain.jobs import create_job
+from bscribe.domain.models import JobStatus, OcrMode, OutputFormat
 from bscribe.domain.ports import JobStorePort
+from bscribe.errors import INTERRUPTED_BY_RESTART_DETAIL
 from bscribe.settings import Settings
 from bscribe.workers import WorkerPool
+from tests.unit.fakes import FakeJobStore
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from pathlib import Path
 
 
 @pytest.fixture(autouse=True)
@@ -114,3 +120,45 @@ async def test_lifespan_creates_and_closes_worker_pool() -> None:
         assert isinstance(pool, WorkerPool)
     # close() is idempotent, so closing again after shutdown must not raise.
     pool.close()
+
+
+async def test_lifespan_sweeps_yield_time_store(tmp_path: Path) -> None:
+    """The lifespan must read app.state.job_store when it runs, not the
+    store that existed at create_app time — tests (and this one) swap it
+    afterwards, and the sweep has to honor whichever store is live at boot.
+    Swapping in a fake here, rather than asserting against the factory's
+    real SqliteJobStore, is what actually exercises that contract."""
+    app = create_app(
+        Settings(db_path=tmp_path / "bscribe.db", scratch_dir=tmp_path / "scratch")
+    )
+    store = FakeJobStore()
+    job = create_job(
+        token_id="feed0001", output=OutputFormat.MARKDOWN, ocr=OcrMode.AUTO
+    )
+    store.add(job)
+    store.mark_running(job.id)
+    app.state.job_store = store
+    stray = tmp_path / "scratch" / "stray.pdf"
+    stray.write_bytes(b"leftover")
+
+    async with app.router.lifespan_context(app):
+        assert isinstance(app.state.worker_pool, WorkerPool)
+
+    swept = store.get(job.id, job.token_id)
+    assert swept is not None
+    assert swept.status is JobStatus.FAILED
+    assert swept.failure_detail == INTERRUPTED_BY_RESTART_DETAIL
+    assert not stray.exists()
+    assert (tmp_path / "scratch").exists()
+
+
+async def test_lifespan_purge_task_runs_until_shutdown() -> None:
+    """The periodic purge task is created at startup and cancelled cleanly
+    at shutdown, alongside the worker pool."""
+    app = create_app(Settings())
+    async with app.router.lifespan_context(app):
+        task = app.state.purge_task
+        assert isinstance(task, asyncio.Task)
+        assert not task.done()
+
+    assert task.done()

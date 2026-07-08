@@ -24,9 +24,9 @@ Two contracts worth stating:
   The full detail vocabulary is defined in :mod:`bscribe.errors`.
 
 Shutdown cancels every in-flight task (killing running workers) but leaves
-the jobs ``queued``/``running`` in the store: the startup sweep (#19) marks
-them failed on the next boot — a deliberately restart-shaped story
-(docs/design.md — Startup sweep).
+the jobs ``queued``/``running`` in the store: the startup sweep
+(:mod:`bscribe.maintenance`) marks them failed on the next boot — a
+deliberately restart-shaped story (docs/design.md — Startup sweep).
 """
 
 from __future__ import annotations
@@ -149,8 +149,8 @@ class JobRunner:
 
         Cancellation kills running workers via ``WorkerPool.parse``. Jobs
         stay ``queued``/``running`` in the store on purpose — the startup
-        sweep (#19) marks them failed on the next boot (see module
-        docstring).
+        sweep (:mod:`bscribe.maintenance`) marks them failed on the next
+        boot (see module docstring).
         """
         # Snapshot like drain(): callbacks mutate _tasks as tasks settle.
         for task in list(self._tasks.values()):

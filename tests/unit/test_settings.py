@@ -26,7 +26,12 @@ class TestDefaults:
     def test_max_upload_defaults_to_fifty_megabytes(self) -> None:
         assert Settings().max_upload_bytes == 50 * 1024 * 1024
 
-    def test_scratch_dir_defaults_under_system_tempdir(self) -> None:
+    def test_scratch_dir_defaults_under_system_tempdir(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The shared conftest points BSCRIBE_SCRATCH_DIR at a temp dir (the
+        # lifespan sweep wipes the scratch dir); clear it to see the default.
+        monkeypatch.delenv("BSCRIBE_SCRATCH_DIR")
         assert Settings().scratch_dir == Path(tempfile.gettempdir()) / "bscribe"
 
     def test_db_path_defaults_to_absolute_user_data_path(
@@ -41,6 +46,9 @@ class TestDefaults:
 
     def test_result_ttl_defaults_to_seven_days(self) -> None:
         assert Settings().result_ttl_seconds == 7 * 24 * 3600
+
+    def test_purge_interval_defaults_to_one_hour(self) -> None:
+        assert Settings().purge_interval_seconds == 3600
 
     def test_log_level_defaults_to_info(self) -> None:
         assert Settings().log_level == "INFO"
@@ -64,6 +72,10 @@ class TestEnvOverrides:
     def test_log_level_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("BSCRIBE_LOG_LEVEL", "DEBUG")
         assert Settings().log_level == "DEBUG"
+
+    def test_purge_interval_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("BSCRIBE_PURGE_INTERVAL_SECONDS", "60")
+        assert Settings().purge_interval_seconds == 60
 
 
 class TestValidation:
@@ -103,6 +115,20 @@ class TestValidation:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("BSCRIBE_MAX_UPLOAD_BYTES", "-1")
+        with pytest.raises(ValidationError):
+            Settings()
+
+    def test_zero_purge_interval_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BSCRIBE_PURGE_INTERVAL_SECONDS", "0")
+        with pytest.raises(ValidationError):
+            Settings()
+
+    def test_negative_purge_interval_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BSCRIBE_PURGE_INTERVAL_SECONDS", "-1")
         with pytest.raises(ValidationError):
             Settings()
 

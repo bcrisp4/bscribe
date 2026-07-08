@@ -36,12 +36,16 @@ class Settings(BaseSettings):
         worker_max_tasks: Jobs a worker runs before being recycled (bounds
             native-library leaks); 0 disables recycling.
         max_upload_bytes: Global upload size limit (rejected with 413).
-        scratch_dir: Transient upload storage (startup wipe arrives with the
-            job store — see design doc "Startup sweep").
+        scratch_dir: Transient upload storage, wiped at startup (see design
+            doc "Startup sweep").
         db_path: SQLite database file (tokens now, jobs from M2). Absolute
             default under the user data dir; the container image sets
             ``BSCRIBE_DB_PATH=/data/bscribe.db``.
-        result_ttl_seconds: How long job results are retained for pickup.
+        result_ttl_seconds: How long job results are retained for pickup;
+            enforced by the periodic purge task, which deletes jobs and
+            results once older than the TTL.
+        purge_interval_seconds: How often the periodic purge task runs to
+            delete expired jobs.
         log_level: Minimum level emitted by the structlog pipeline.
     """
 
@@ -54,4 +58,5 @@ class Settings(BaseSettings):
     scratch_dir: Path = Field(default_factory=_default_scratch_dir)
     db_path: Path = Field(default_factory=_default_db_path)
     result_ttl_seconds: int = Field(default=7 * 24 * 3600, gt=0)
+    purge_interval_seconds: int = Field(default=3600, gt=0)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"

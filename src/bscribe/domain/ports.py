@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from datetime import datetime
     from pathlib import Path
 
     from bscribe.domain.models import (
@@ -208,6 +209,48 @@ class JobStorePort(Protocol):
         Returns:
             ``True`` if a job was deleted; ``False`` for an unknown id or
             another token's job (indistinguishable by design).
+        """
+        ...
+
+    def sweep_incomplete(self, detail: str) -> int:
+        """Mark every queued/running job failed with ``detail``.
+
+        Stamps ``finished_at``. The startup sweep's operation
+        (docs/design.md — Job lifecycle): worker processes live and die
+        with the container, so a restart abandons queued/running jobs.
+        Cross-token by design — this is maintenance, not a caller
+        operation, so it is unscoped; ``detail`` is a parameter rather
+        than a constant so the port never imports app-layer vocabulary
+        (see bscribe.errors).
+
+        Args:
+            detail: Fixed failure reason to stamp on every transitioned
+                job (e.g. ``"interrupted by restart — resubmit"``).
+
+        Returns:
+            The number of jobs transitioned.
+        """
+        ...
+
+    def purge_older_than(self, cutoff: datetime) -> int:
+        """Delete every job created before ``cutoff``, any status or token.
+
+        Covers orphaned jobs of deleted tokens (docs/design.md — Admin
+        CLI), which carry no foreign key to expire them otherwise. The TTL
+        anchor is ``created_at`` — always non-``None``, unlike
+        ``finished_at`` — and differs from it by at most the job timeout,
+        so the distinction is immaterial for retention purposes.
+
+        Args:
+            cutoff: Timezone-aware boundary; jobs created strictly before
+                it, including their stored results, are deleted.
+
+        Returns:
+            The number of jobs deleted.
+
+        Raises:
+            ValueError: ``cutoff`` is naive (see :class:`Job`'s
+                timezone-aware invariant).
         """
         ...
 

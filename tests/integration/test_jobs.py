@@ -10,6 +10,9 @@ pool is constructed here and torn down in ``finally``, mirroring
 
 from __future__ import annotations
 
+import asyncio
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -19,8 +22,14 @@ import structlog
 from httpx import ASGITransport
 
 from bscribe.app import create_app
+from bscribe.domain.jobs import create_job
+from bscribe.domain.models import OcrMode, OutputFormat
 from bscribe.domain.tokens import mint_token
-from bscribe.errors import JOB_FAILED_NO_RESULT_DETAIL, UNPARSEABLE_DETAIL
+from bscribe.errors import (
+    INTERRUPTED_BY_RESTART_DETAIL,
+    JOB_FAILED_NO_RESULT_DETAIL,
+    UNPARSEABLE_DETAIL,
+)
 from bscribe.settings import Settings
 from bscribe.workers import WorkerPool
 
@@ -155,3 +164,84 @@ async def test_unparseable_document_becomes_failed_job(
     assert result.status_code == 409
     assert result.json()["detail"] == JOB_FAILED_NO_RESULT_DETAIL
     assert list((tmp_path / "scratch").iterdir()) == []
+
+
+async def test_restart_marks_incomplete_job_failed_over_http(tmp_path: Path) -> None:
+    """The restart story end-to-end: a job abandoned mid-run by a prior
+    process is failed by the lifespan's startup sweep before the app ever
+    serves a request, and a poll after boot reflects it.
+
+    The shared ``app`` fixture builds its pool by hand (mirroring
+    ``test_convert.py``) rather than running the lifespan, since ASGITransport
+    never runs it — this test needs the real lifespan, so it constructs the
+    app locally and enters ``lifespan_context`` explicitly instead."""
+    application = create_app(
+        Settings(
+            db_path=tmp_path / "bscribe.db",
+            scratch_dir=tmp_path / "scratch",
+            worker_count=1,
+        )
+    )
+    token, secret = mint_token("bsearch")
+    application.state.token_store.add(token)
+    headers = {"Authorization": f"Bearer {secret}"}
+
+    store = application.state.job_store
+    job = create_job(token_id=token.id, output=OutputFormat.MARKDOWN, ocr=OcrMode.AUTO)
+    store.add(job)
+    store.mark_running(job.id)
+
+    async with application.router.lifespan_context(application):
+        transport = ASGITransport(app=application)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as client:
+            status = await client.get(f"/v1/jobs/{job.id}", headers=headers)
+
+    assert status.status_code == 200
+    body = status.json()
+    assert body["status"] == "failed"
+    assert body["failure_detail"] == INTERRUPTED_BY_RESTART_DETAIL
+
+
+async def test_ttl_purge_removes_expired_job_over_http(tmp_path: Path) -> None:
+    """The M2 TTL story end-to-end: the periodic purge task, started by the
+    real lifespan, deletes a job past its retention window without any
+    request ever triggering the purge directly.
+
+    ``result_ttl_seconds=1`` with an already-stale ``created_at`` guarantees
+    the job is expired the instant the app boots; ``purge_loop`` purges
+    before its first sleep, so the deletion happens on the loop's first
+    iteration rather than waiting a full interval — the poll below is
+    bounded but only needs to yield the event loop for that task to run."""
+    application = create_app(
+        Settings(
+            db_path=tmp_path / "bscribe.db",
+            scratch_dir=tmp_path / "scratch",
+            worker_count=1,
+            result_ttl_seconds=1,
+            purge_interval_seconds=3600,
+        )
+    )
+    token, secret = mint_token("bsearch")
+    application.state.token_store.add(token)
+    headers = {"Authorization": f"Bearer {secret}"}
+
+    store = application.state.job_store
+    job = create_job(token_id=token.id, output=OutputFormat.MARKDOWN, ocr=OcrMode.AUTO)
+    job = replace(job, created_at=datetime.now(tz=UTC) - timedelta(minutes=1))
+    store.add(job)
+
+    async def poll_until_purged(client: httpx.AsyncClient) -> None:
+        while True:
+            response = await client.get(f"/v1/jobs/{job.id}", headers=headers)
+            if response.status_code == 404:
+                return
+            await asyncio.sleep(0)
+
+    async with application.router.lifespan_context(application):
+        transport = ASGITransport(app=application)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as client:
+            await asyncio.wait_for(poll_until_purged(client), timeout=5)
