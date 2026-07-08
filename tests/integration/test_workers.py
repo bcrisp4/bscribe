@@ -33,6 +33,7 @@ from bscribe.domain import (
     ParsedDocument,
     WorkerCrashedError,
 )
+from bscribe.pipeline import discover_pipeline
 from bscribe.workers import WorkerPool
 
 if TYPE_CHECKING:
@@ -80,6 +81,7 @@ def _scripted_pool(
         worker_count=worker_count,
         job_timeout_seconds=job_timeout_seconds,
         worker_max_tasks=worker_max_tasks,
+        pipeline_info=discover_pipeline(),
         parser_factory=ScriptedParser,
     )
 
@@ -95,7 +97,13 @@ async def scripted_pool() -> AsyncIterator[WorkerPool]:
 
 async def test_parses_sample_pdf_in_worker(tmp_path: Path) -> None:
     """Full round-trip with the real liteparse parser in a real worker."""
-    pool = WorkerPool(worker_count=1, job_timeout_seconds=60.0, worker_max_tasks=0)
+    pipeline_info = discover_pipeline()
+    pool = WorkerPool(
+        worker_count=1,
+        job_timeout_seconds=60.0,
+        worker_max_tasks=0,
+        pipeline_info=pipeline_info,
+    )
     try:
         result = await pool.parse(
             SAMPLE_PDF, output=OutputFormat.MARKDOWN, ocr=OcrMode.OFF
@@ -105,6 +113,12 @@ async def test_parses_sample_pdf_in_worker(tmp_path: Path) -> None:
     assert result.pages == 1
     assert "Sample PDF" in result.content
     assert result.duration_ms > 0
+    # Real stamping, exercised for free: the parent stamps the result with
+    # the app-wide fingerprint filtered to what a .pdf/ocr=off parse
+    # traverses (see bscribe.domain.pipeline.traversed_stamp).
+    assert result.pipeline is not None
+    assert result.pipeline.fingerprint == pipeline_info.fingerprint
+    assert set(result.pipeline.components) == {"bscribe", "liteparse", "pdfium"}
 
 
 async def test_document_unparseable_propagates_from_worker(

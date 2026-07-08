@@ -21,9 +21,8 @@ from bscribe.domain.errors import UnsupportedFormatError
 
 # Source of truth: liteparse conversion.rs is_supported_extension.
 # Re-verify on liteparse upgrades (the adapter targets 2.4.0).
-SUPPORTED_EXTENSIONS: frozenset[str] = frozenset(
+OFFICE_EXTENSIONS: frozenset[str] = frozenset(
     {
-        ".pdf",
         # office documents (converted to PDF via LibreOffice)
         ".doc",
         ".docx",
@@ -55,7 +54,12 @@ SUPPORTED_EXTENSIONS: frozenset[str] = frozenset(
         ".csv",
         ".tsv",
         ".numbers",
-        # images (converted to PDF via ImageMagick; .svg also needs Ghostscript)
+    }
+)
+
+# images (converted to PDF via ImageMagick; .svg also needs Ghostscript)
+IMAGE_EXTENSIONS: frozenset[str] = frozenset(
+    {
         ".jpg",
         ".jpeg",
         ".png",
@@ -66,6 +70,10 @@ SUPPORTED_EXTENSIONS: frozenset[str] = frozenset(
         ".webp",
         ".svg",
     }
+)
+
+SUPPORTED_EXTENSIONS: frozenset[str] = (
+    frozenset({".pdf"}) | OFFICE_EXTENSIONS | IMAGE_EXTENSIONS
 )
 
 

@@ -30,6 +30,7 @@ from bscribe.errors import (
     JOB_FAILED_NO_RESULT_DETAIL,
     UNPARSEABLE_DETAIL,
 )
+from bscribe.pipeline import discover_pipeline
 from bscribe.settings import Settings
 from bscribe.workers import WorkerPool
 
@@ -53,7 +54,12 @@ async def app(tmp_path: Path) -> AsyncIterator[FastAPI]:
     application = create_app(
         Settings(db_path=tmp_path / "bscribe.db", scratch_dir=tmp_path / "scratch")
     )
-    pool = WorkerPool(worker_count=1, job_timeout_seconds=60.0, worker_max_tasks=0)
+    pool = WorkerPool(
+        worker_count=1,
+        job_timeout_seconds=60.0,
+        worker_max_tasks=0,
+        pipeline_info=discover_pipeline(),
+    )
     application.state.worker_pool = pool
     try:
         yield application

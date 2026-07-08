@@ -19,7 +19,7 @@ from bscribe.domain.ports import JobStorePort
 from bscribe.errors import INTERRUPTED_BY_RESTART_DETAIL
 from bscribe.settings import Settings
 from bscribe.workers import WorkerPool
-from tests.unit.fakes import FakeJobStore
+from tests.unit.fakes import CANNED_PIPELINE_STAMP, FakeJobStore
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -73,6 +73,34 @@ async def test_job_store_built_at_factory_time() -> None:
     assert isinstance(app.state.job_store, JobStorePort)
 
 
+async def test_explicit_pipeline_info_exposed_on_app_state() -> None:
+    """A caller-supplied stamp lands on state verbatim; discovery never runs."""
+    app = create_app(pipeline_info=CANNED_PIPELINE_STAMP)
+
+    assert app.state.pipeline_info is CANNED_PIPELINE_STAMP
+
+
+async def test_default_pipeline_info_runs_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``pipeline_info=None`` calls real discovery and lands its result on
+    state — the autouse fixture in ``tests/unit/conftest.py`` patches this
+    same target for every *other* test, so this test overrides it back to
+    a locally-scoped fake to assert the call actually happens."""
+    calls: list[None] = []
+
+    def _fake_discover() -> object:
+        calls.append(None)
+        return CANNED_PIPELINE_STAMP
+
+    monkeypatch.setattr("bscribe.app.discover_pipeline", _fake_discover)
+
+    app = create_app()
+
+    assert len(calls) == 1
+    assert app.state.pipeline_info is CANNED_PIPELINE_STAMP
+
+
 async def test_unknown_path_returns_problem_json() -> None:
     """Error handlers are wired: 404 comes back as application/problem+json."""
     async with make_client() as client:
@@ -110,6 +138,22 @@ async def test_access_log_excludes_query_string(
         await client.get("/healthz", params={"filename": "medical-letter.pdf"})
 
     assert "medical-letter" not in capsys.readouterr().out
+
+
+async def test_pipeline_discovered_logged_at_factory_time(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """One INFO line names the fingerprint and components — privacy-safe
+    (version strings only, see docs/design.md — Privacy)."""
+    create_app(pipeline_info=CANNED_PIPELINE_STAMP)
+
+    lines = [line for line in capsys.readouterr().out.splitlines() if line]
+    events = [json.loads(line) for line in lines]
+    discovered = [event for event in events if event["event"] == "pipeline_discovered"]
+    assert len(discovered) == 1
+    assert discovered[0]["fingerprint"] == CANNED_PIPELINE_STAMP.fingerprint
+    assert discovered[0]["components"] == dict(CANNED_PIPELINE_STAMP.components)
+    assert discovered[0]["level"] == "info"
 
 
 async def test_lifespan_creates_and_closes_worker_pool() -> None:

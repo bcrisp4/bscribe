@@ -8,11 +8,13 @@ from datetime import UTC, datetime
 import pytest
 
 from bscribe.domain.models import (
+    Component,
     Job,
     JobStatus,
     OcrMode,
     OutputFormat,
     ParsedDocument,
+    PipelineStamp,
 )
 
 
@@ -47,9 +49,12 @@ def make_parsed_document(
     content: str = "# Title\n\nBody.",
     pages: int = 1,
     duration_ms: float = 12.5,
+    pipeline: PipelineStamp | None = None,
 ) -> ParsedDocument:
     """Build a ParsedDocument with sensible defaults."""
-    return ParsedDocument(content=content, pages=pages, duration_ms=duration_ms)
+    return ParsedDocument(
+        content=content, pages=pages, duration_ms=duration_ms, pipeline=pipeline
+    )
 
 
 class TestOutputFormat:
@@ -163,3 +168,16 @@ class TestParsedDocument:
         doc = make_parsed_document()
         with pytest.raises(dataclasses.FrozenInstanceError):
             doc.content = "changed"  # type: ignore[misc]
+
+    def test_pipeline_defaults_to_none(self) -> None:
+        # None means "not yet stamped" or "predates this feature" — stamping
+        # happens parent-side in WorkerPool, not inside the worker.
+        assert make_parsed_document().pipeline is None
+
+    def test_constructible_with_a_pipeline_stamp(self) -> None:
+        stamp = PipelineStamp(
+            fingerprint="abc123def456",
+            components={Component.BSCRIBE.value: "0.3.0"},
+        )
+        doc = make_parsed_document(pipeline=stamp)
+        assert doc.pipeline is stamp

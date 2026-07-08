@@ -31,6 +31,7 @@ thread, revisit.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import multiprocessing
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
@@ -44,6 +45,7 @@ from bscribe.domain import (
     JobTimeoutError,
     ParsedDocument,
     WorkerCrashedError,
+    traversed_stamp,
 )
 
 if TYPE_CHECKING:
@@ -52,7 +54,7 @@ if TYPE_CHECKING:
 
     from pebble import ProcessFuture
 
-    from bscribe.domain import OcrMode, OutputFormat, ParserPort
+    from bscribe.domain import OcrMode, OutputFormat, ParserPort, PipelineStamp
 
 logger = structlog.get_logger()
 
@@ -116,6 +118,13 @@ class WorkerPool:
     instance, so ``worker_count`` bounds total parse concurrency. pebble
     spawns workers lazily on the first scheduled job (verified 5.2.0), so
     construction is cheap.
+
+    Pipeline stamping (docs/design.md — Re-ingestion contract) happens
+    parent-side, in :meth:`parse`, not inside the worker process: workers
+    return an unstamped ``ParsedDocument`` and this class fills in
+    ``pipeline`` from the app-wide :class:`~bscribe.domain.models.PipelineStamp`
+    fixed at construction time, filtered to what the one document parsed
+    actually traversed.
     """
 
     def __init__(
@@ -124,11 +133,13 @@ class WorkerPool:
         worker_count: int,
         job_timeout_seconds: float,
         worker_max_tasks: int,
+        pipeline_info: PipelineStamp,
         parser_factory: Callable[[], ParserPort] = LiteparseParser,
     ) -> None:
         self._worker_count = worker_count
         self._job_timeout_seconds = job_timeout_seconds
         self._worker_max_tasks = worker_max_tasks
+        self._pipeline_info = pipeline_info
         self._parser_factory = parser_factory
         self._closed = False
         self.metrics = WorkerPoolMetrics()
@@ -150,6 +161,17 @@ class WorkerPool:
         self, path: Path, *, output: OutputFormat, ocr: OcrMode
     ) -> ParsedDocument:
         """Parse ``path`` in a worker process (async twin of ``ParserPort``).
+
+        On success, stamps the result's ``pipeline`` field parent-side —
+        the worker returns a document with ``pipeline=None`` (see
+        ``_parse_in_worker``); this method fills it in from
+        ``self._pipeline_info`` filtered to ``path``/``ocr``'s traversal
+        (:func:`~bscribe.domain.pipeline.traversed_stamp`). ``path.suffix``
+        is trustworthy here even though it is derived from an upload:
+        staged uploads are written under a random name with the original
+        extension preserved (see ``bscribe.api.staging.stage_upload``), and
+        extension is what liteparse itself dispatches on, so it cannot
+        under- or over-report what the parse actually traversed.
 
         Raises:
             DocumentUnparseableError: The engine rejected the document.
@@ -189,7 +211,7 @@ class WorkerPool:
                 # were tearing down the broken one). Do not rebuild again.
                 raise WorkerCrashedError("worker pool unavailable") from retry_exc
         try:
-            return cast("ParsedDocument", await asyncio.wrap_future(future))
+            result = cast("ParsedDocument", await asyncio.wrap_future(future))
         except asyncio.CancelledError:
             # asyncio.wrap_future already chains cancellation to the pebble
             # future; calling cancel() again is an idempotent way to learn
@@ -217,6 +239,12 @@ class WorkerPool:
             self.metrics.crashes += 1
             logger.error("worker_pool_broken", error_type=type(exc).__name__)
             raise WorkerCrashedError("worker pool broken") from exc
+        return dataclasses.replace(
+            result,
+            pipeline=traversed_stamp(
+                self._pipeline_info, extension=path.suffix, ocr=ocr
+            ),
+        )
 
     def _schedule(
         self, path: Path, output: OutputFormat, ocr: OcrMode

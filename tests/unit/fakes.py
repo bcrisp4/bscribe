@@ -15,12 +15,21 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from bscribe.domain.models import Job, JobStatus, ParsedDocument
+from bscribe.domain.models import Job, JobStatus, ParsedDocument, PipelineStamp
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from bscribe.domain.models import OcrMode, OutputFormat
+
+# Canned pipeline stamp for tests that don't care about real discovery —
+# a fixed fingerprint plus deterministic version strings for every
+# component, so assertions can compare against exact values instead of
+# whatever happens to be installed on the machine running the suite.
+CANNED_PIPELINE_STAMP = PipelineStamp(
+    fingerprint="fakefinger12",
+    components={"bscribe": "0.0.0-test", "liteparse": "0.0.0-test"},
+)
 
 
 @dataclass
@@ -156,7 +165,10 @@ class GatedPool:
         exc: Exception | None = None,
     ) -> None:
         self._result = result or ParsedDocument(
-            content="# Heading", pages=3, duration_ms=41.7
+            content="# Heading",
+            pages=3,
+            duration_ms=41.7,
+            pipeline=CANNED_PIPELINE_STAMP,
         )
         self._exc = exc
         self.started = asyncio.Event()

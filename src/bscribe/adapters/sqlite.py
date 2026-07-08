@@ -9,6 +9,7 @@ the server runs (docs/design.md — Admin CLI).
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -21,6 +22,7 @@ from bscribe.domain.models import (
     OcrMode,
     OutputFormat,
     ParsedDocument,
+    PipelineStamp,
     Token,
 )
 
@@ -68,6 +70,10 @@ _MIGRATIONS: tuple[str, ...] = (
     # id tiebreak in that ORDER BY still needs a small temp B-tree over
     # created_at ties (id is not the rowid) — immaterial at this scale.
     "CREATE INDEX jobs_token_created ON jobs (token_id, created_at DESC)",
+    # NULL on existing done rows is a legitimate pre-upgrade state (get_result
+    # must not treat it as corruption) — only a genuinely missing result_*
+    # trio still means external corruption. See _stamp_from_json.
+    "ALTER TABLE jobs ADD COLUMN result_pipeline TEXT",
 )
 
 
@@ -217,6 +223,63 @@ def _row_to_job(
         ),
         failure_detail=failure_detail,
     )
+
+
+def _stamp_to_json(stamp: PipelineStamp | None) -> str | None:
+    """Serialize a pipeline stamp as compact canonical JSON for storage.
+
+    Args:
+        stamp: The result's pipeline stamp, or ``None`` if unstamped.
+
+    Returns:
+        Compact JSON with ``components`` keys sorted (so equivalent stamps
+        always produce byte-identical text), or ``None`` for ``stamp is
+        None``.
+    """
+    if stamp is None:
+        return None
+    return json.dumps(
+        {
+            "fingerprint": stamp.fingerprint,
+            "components": dict(sorted(stamp.components.items())),
+        },
+        separators=(",", ":"),
+    )
+
+
+def _stamp_from_json(job_id: str, text: str | None) -> PipelineStamp | None:
+    """Deserialize a stored pipeline stamp.
+
+    Args:
+        job_id: The owning job's id, for the error message only.
+        text: The raw ``result_pipeline`` column value. ``None`` is a
+            legitimate state — a pre-upgrade row or a result stored before
+            stamping existed — never treated as corruption.
+
+    Returns:
+        The decoded stamp, or ``None`` for ``text is None``.
+
+    Raises:
+        ValueError: ``text`` is not valid JSON, or is valid JSON with the
+            wrong shape (e.g. ``{}``, ``null``, a missing ``"components"``
+            key) — both only reachable through external edits (the
+            operator's sanctioned debug path is raw SQLite); the message
+            never quotes the stored text.
+    """
+    if text is None:
+        return None
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        msg = f"job {job_id}: result_pipeline is not valid JSON"
+        raise ValueError(msg) from exc
+    try:
+        return PipelineStamp(
+            fingerprint=data["fingerprint"], components=data["components"]
+        )
+    except (KeyError, TypeError) as exc:
+        msg = f"job {job_id}: result_pipeline has an unexpected shape"
+        raise ValueError(msg) from exc
 
 
 def _row_to_token(row: tuple[str, str, str, str]) -> Token:
@@ -410,27 +473,36 @@ class SqliteJobStore:
             token's job, or any non-``done`` status.
 
         Raises:
-            ValueError: The done row's result columns are incomplete —
-                only reachable through external edits (the operator's
-                sanctioned debug path is raw SQLite); the message carries
-                the job id, never stored content.
+            ValueError: The done row's result columns are incomplete, or
+                ``result_pipeline`` holds unparseable JSON — only reachable
+                through external edits (the operator's sanctioned debug path
+                is raw SQLite); the message carries the job id, never stored
+                content.
         """
         with _connect(self._db_path) as conn:
             row = conn.execute(
-                "SELECT result_content, result_pages, result_duration_ms"
+                "SELECT result_content, result_pages, result_duration_ms,"
+                " result_pipeline"
                 " FROM jobs WHERE id = ? AND token_id = ? AND status = ?",
                 (job_id, token_id, JobStatus.DONE.value),
             ).fetchone()
         if row is None:
             return None
-        content, pages, duration_ms = row
-        # mark_done writes all three columns atomically; NULLs on a done row
-        # mean it was edited outside the store. Fail loudly — an explicit
-        # raise, not an assert, so the guard survives python -O.
+        content, pages, duration_ms, pipeline_json = row
+        # mark_done writes the content/pages/duration trio atomically; NULLs
+        # on a done row mean it was edited outside the store. Fail loudly —
+        # an explicit raise, not an assert, so the guard survives python -O.
+        # result_pipeline is exempt: NULL there is a legitimate pre-upgrade
+        # or never-stamped row, not corruption (see _stamp_from_json).
         if content is None or pages is None or duration_ms is None:
             msg = f"job {job_id}: result columns incomplete on done row"
             raise ValueError(msg)
-        return ParsedDocument(content=content, pages=pages, duration_ms=duration_ms)
+        return ParsedDocument(
+            content=content,
+            pages=pages,
+            duration_ms=duration_ms,
+            pipeline=_stamp_from_json(job_id, pipeline_json),
+        )
 
     def list_for_token(
         self, token_id: str, *, status: JobStatus | None = None
@@ -483,7 +555,9 @@ class SqliteJobStore:
 
         Args:
             job_id: The job's id.
-            result: The parse result; stamped with ``finished_at``.
+            result: The parse result; stamped with ``finished_at``. Its
+                ``pipeline`` stamp (if any) is persisted as canonical JSON;
+                ``None`` stores NULL.
 
         Returns:
             ``True`` if the transition applied; ``False`` for a missing
@@ -493,7 +567,8 @@ class SqliteJobStore:
         with _connect(self._db_path) as conn:
             cursor = conn.execute(
                 "UPDATE jobs SET status = ?, finished_at = ?,"
-                " result_content = ?, result_pages = ?, result_duration_ms = ?"
+                " result_content = ?, result_pages = ?, result_duration_ms = ?,"
+                " result_pipeline = ?"
                 " WHERE id = ? AND status = ?",
                 (
                     JobStatus.DONE.value,
@@ -501,6 +576,7 @@ class SqliteJobStore:
                     result.content,
                     result.pages,
                     result.duration_ms,
+                    _stamp_to_json(result.pipeline),
                     job_id,
                     JobStatus.RUNNING.value,
                 ),

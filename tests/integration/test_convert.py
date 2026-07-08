@@ -20,6 +20,7 @@ from httpx import ASGITransport
 
 from bscribe.app import create_app
 from bscribe.domain.tokens import mint_token
+from bscribe.pipeline import discover_pipeline
 from bscribe.settings import Settings
 from bscribe.workers import WorkerPool
 
@@ -39,7 +40,12 @@ async def test_convert_sample_pdf_end_to_end(tmp_path: Path) -> None:
     app = create_app(
         Settings(db_path=tmp_path / "tokens.db", scratch_dir=tmp_path / "scratch")
     )
-    pool = WorkerPool(worker_count=1, job_timeout_seconds=60.0, worker_max_tasks=0)
+    pool = WorkerPool(
+        worker_count=1,
+        job_timeout_seconds=60.0,
+        worker_max_tasks=0,
+        pipeline_info=discover_pipeline(),
+    )
     app.state.worker_pool = pool
     token, secret = mint_token("bsearch")
     app.state.token_store.add(token)
