@@ -31,7 +31,8 @@ class Settings(BaseSettings):
 
     Attributes:
         worker_count: Parse worker processes; bounds total parse concurrency.
-        job_timeout_seconds: Per-job deadline; the worker is SIGKILLed at it.
+        job_timeout_seconds: Per-job deadline; the worker is forcibly
+            killed at it (termination signal escalating to SIGKILL).
         worker_max_tasks: Jobs a worker runs before being recycled (bounds
             native-library leaks); 0 disables recycling.
         max_upload_bytes: Global upload size limit (rejected with 413).
