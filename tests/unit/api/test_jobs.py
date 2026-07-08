@@ -476,6 +476,118 @@ class TestListJobs:
         assert "SENSITIVE-TEXT" not in response.text
 
 
+class TestDeleteJob:
+    @pytest.mark.parametrize(
+        "status",
+        [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.DONE, JobStatus.FAILED],
+    )
+    async def test_purges_job_in_any_state(
+        self, tmp_path: Path, status: JobStatus
+    ) -> None:
+        app = make_app(tmp_path)[0]
+        token, secret = issue_token(app)
+        job = seed_job(app, token.id, status=status)
+        async with make_client(app) as client:
+            response = await client.delete(
+                f"/v1/jobs/{job.id}", headers={"Authorization": f"Bearer {secret}"}
+            )
+            followup = await client.get(
+                f"/v1/jobs/{job.id}", headers={"Authorization": f"Bearer {secret}"}
+            )
+            listed = await client.get(
+                "/v1/jobs", headers={"Authorization": f"Bearer {secret}"}
+            )
+        assert response.status_code == 204
+        assert response.content == b""
+        assert followup.status_code == 404
+        assert listed.json() == {"jobs": []}
+        # The DONE case seeds a stored result; delete purges it with the row.
+        store: JobStorePort = app.state.job_store
+        assert store.get_result(job.id, token.id) is None
+
+    async def test_running_job_is_cancelled_and_scratch_cleaned(
+        self, tmp_path: Path
+    ) -> None:
+        """DELETE on an in-flight job cancels its runner task (which kills
+        the worker in production — WorkerPool.parse) and the task's cleanup
+        deletes the scratch upload; the pool gate is never released, so the
+        job was cancelled, not completed."""
+        app, pool = make_app(tmp_path)
+        token, secret = issue_token(app)
+        async with make_client(app) as client:
+            submitted = await submit(client, secret)
+            job_id = submitted.json()["id"]
+            await pool.started.wait()
+            task = app.state.job_runner.task_for(job_id)
+            assert task is not None
+            response = await client.delete(
+                f"/v1/jobs/{job_id}", headers={"Authorization": f"Bearer {secret}"}
+            )
+            await app.state.job_runner.drain()
+        assert response.status_code == 204
+        assert task.cancelled()
+        assert not pool.release.is_set()
+        assert app.state.job_store.get(job_id, token.id) is None
+        assert scratch_files(tmp_path) == []
+
+    async def test_second_delete_is_404(self, tmp_path: Path) -> None:
+        app = make_app(tmp_path)[0]
+        token, secret = issue_token(app)
+        job = seed_job(app, token.id)
+        async with make_client(app) as client:
+            first = await client.delete(
+                f"/v1/jobs/{job.id}", headers={"Authorization": f"Bearer {secret}"}
+            )
+            second = await client.delete(
+                f"/v1/jobs/{job.id}", headers={"Authorization": f"Bearer {secret}"}
+            )
+        assert first.status_code == 204
+        assert second.status_code == 404
+
+    async def test_unknown_id_is_404(self, tmp_path: Path) -> None:
+        app = make_app(tmp_path)[0]
+        secret = issue_token(app)[1]
+        async with make_client(app) as client:
+            response = await client.delete(
+                "/v1/jobs/deadbeefdeadbeef",
+                headers={"Authorization": f"Bearer {secret}"},
+            )
+        assert response.status_code == 404
+
+    async def test_cross_token_404_is_indistinguishable_and_deletes_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        """Same status and byte-identical body as an unknown id, and the
+        owner's job survives — deletion never leaks or acts across tokens."""
+        app = make_app(tmp_path)[0]
+        owner = issue_token(app, "owner")[0]
+        other_secret = issue_token(app, "other")[1]
+        job = seed_job(app, owner.id)
+        async with make_client(app) as client:
+            cross = await client.delete(
+                f"/v1/jobs/{job.id}",
+                headers={"Authorization": f"Bearer {other_secret}"},
+            )
+            unknown = await client.delete(
+                "/v1/jobs/deadbeefdeadbeef",
+                headers={"Authorization": f"Bearer {other_secret}"},
+            )
+        assert cross.status_code == 404
+        assert cross.content == unknown.content
+        assert app.state.job_store.get(job.id, owner.id) is not None
+
+    async def test_missing_token_is_401_and_deletes_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        app = make_app(tmp_path)[0]
+        token = issue_token(app)[0]
+        job = seed_job(app, token.id)
+        async with make_client(app) as client:
+            response = await client.delete(f"/v1/jobs/{job.id}")
+        assert response.status_code == 401
+        assert app.state.job_store.get(job.id, token.id) is not None
+
+
 class TestJobsPrivacy:
     async def test_filename_and_content_absent_from_info_logs(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]

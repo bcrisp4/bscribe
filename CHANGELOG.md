@@ -22,6 +22,9 @@ section is renamed to the new version and becomes the GitHub Release notes.
   the same worker pool as synchronous conversions, are visible only to the
   bearer token that created them, and their uploads are deleted as soon as
   parsing finishes.
+- Job cancellation: `DELETE /v1/jobs/{id}` cancels and purges a job in any
+  state (`204`). A running job's worker process is killed immediately and
+  its staged upload is deleted; a finished job's stored result is purged.
 
 ## [0.1.0] - 2026-07-07
 
