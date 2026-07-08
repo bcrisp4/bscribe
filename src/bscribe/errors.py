@@ -40,18 +40,36 @@ PROBLEM_JSON_MEDIA_TYPE = "application/problem+json"
 # emit an identical 413 body instead of two copy-pasted literals.
 UPLOAD_TOO_LARGE_DETAIL = "upload exceeds maximum size"
 
+# The complete failure_detail vocabulary for async jobs lives here, one
+# audit site for the privacy rule that details are fixed strings — never
+# ``str(exc)``. The first two are shared with the sync path's status
+# mapping below; the last two are used only by the job runner
+# (bscribe.runner) — the sync path's equivalent responses are generic 500
+# bodies, not stored failure reasons.
+UNPARSEABLE_DETAIL = "document could not be parsed"
+TIMEOUT_DETAIL = "timeout"
+WORKER_CRASHED_DETAIL = "worker crashed"
+INTERNAL_ERROR_DETAIL = "internal error"
+
+# The 409 body for a result fetch on a failed job (GET /v1/jobs/{id}/result).
+# Deliberately not composed with the job's failure_detail: callers read the
+# reason from the status endpoint, and string composition would be a future
+# leak surface for nothing.
+JOB_FAILED_NO_RESULT_DETAIL = "job failed; no result available"
+
 logger = structlog.get_logger()
 
 # Domain/ingestion exceptions raised on the sync convert path, mapped to the
 # status-code contract (docs/design.md). Details are fixed strings — never
 # ``str(exc)`` — because exception messages can quote parser internals or
-# submitted values (see Privacy). The async path (M2) catches these inside
-# the job runner, so these handlers only ever fire on the sync path.
+# submitted values (see Privacy). The async path catches these inside the
+# job runner (bscribe.runner), so these handlers only ever fire on the sync
+# path.
 _DOMAIN_ERROR_STATUS: dict[type[Exception], tuple[int, str]] = {
     UnsupportedFormatError: (415, "unsupported input format"),
     UploadTooLargeError: (413, UPLOAD_TOO_LARGE_DETAIL),
-    DocumentUnparseableError: (422, "document could not be parsed"),
-    JobTimeoutError: (500, "timeout"),
+    DocumentUnparseableError: (422, UNPARSEABLE_DETAIL),
+    JobTimeoutError: (500, TIMEOUT_DETAIL),
     WorkerCrashedError: (500, "Internal server error"),
 }
 

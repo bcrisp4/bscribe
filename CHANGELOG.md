@@ -11,6 +11,18 @@ section is renamed to the new version and becomes the GitHub Release notes.
 
 ## [Unreleased]
 
+### Added
+
+- Asynchronous conversion jobs: `POST /v1/jobs` accepts the same upload and
+  parameters as `/v1/convert` but returns a job id immediately (`201`).
+  Poll `GET /v1/jobs/{id}` for status (`queued | running | done | failed`),
+  fetch the finished document from `GET /v1/jobs/{id}/result` (`202` while
+  in progress, `409` if the job failed), and list your jobs with
+  `GET /v1/jobs` (newest first, optional `?status=` filter). Jobs run on
+  the same worker pool as synchronous conversions, are visible only to the
+  bearer token that created them, and their uploads are deleted as soon as
+  parsing finishes.
+
 ## [0.1.0] - 2026-07-07
 
 ### Added

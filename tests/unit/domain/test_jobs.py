@@ -16,7 +16,6 @@ def test_new_job_is_queued_with_only_created_at_set() -> None:
     assert job.started_at is None
     assert job.finished_at is None
     assert job.failure_detail is None
-    assert job.result is None
 
 
 def test_preserves_submission_parameters() -> None:

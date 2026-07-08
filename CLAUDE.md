@@ -6,7 +6,7 @@ Guidance for Claude Code (claude.ai/code) working in this repo.
 
 bscribe = self-hosted HTTP service. Converts documents (PDF, office formats, images) to plain text or markdown. Consumed by other self-hosted services. Single user. Targets Raspberry Pi 5-class hardware (no GPU). Container-first.
 
-**`docs/design.md` is authoritative design.** Read before any structural work — records every load-bearing decision with rationale; superseded decisions in Closed issues section. Never contradict silently; propose doc change first.
+**`docs/design.md` is authoritative design.** Read before any structural work — records every load-bearing decision with rationale; superseded decisions in Closed issues section. Never contradict silently; propose doc change first. Implementation that elaborates or diverges from a contract detail (wire shapes, status semantics) gets design.md updated **in the same PR** — flagging the divergence in the PR body alone is not enough.
 
 Designs/specs committed under `docs/`. Implementation plans **never** committed — `docs/superpowers/plans/` gitignored on purpose, no force-add.
 
@@ -84,5 +84,9 @@ Every behavior-changing PR must add entry under `[Unreleased]` in `CHANGELOG.md`
 ## Testing conventions
 
 Tests mirror source layout (`src/bscribe/foo.py` → `tests/unit/foo/test_foo.py`). pytest-asyncio auto mode. `httpx` drives FastAPI endpoints. Coverage = signal, not target.
+
+httpx `ASGITransport` runs no lifespan — construct/swap `app.state.worker_pool` manually (factory-time state like `job_store`/`job_runner` already exists). It also re-raises unhandled app exceptions instead of returning the catch-all 500 problem response — test that path with `pytest.raises`, not `response.status_code == 500`.
+
+Shared in-memory fakes (`FakeJobStore`, `GatedPool`) live in `tests/unit/fakes.py` — extend there, never redefine per test file. Other scaffolding (`make_app`, `issue_token`, …) stays per-file by convention.
 
 `tests/integration/` = real-engine tests (no mocks); runs in the normal pytest/CI sweep. Fixture provenance documented in its `__init__.py`.

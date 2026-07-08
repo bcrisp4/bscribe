@@ -57,36 +57,70 @@ class JobStorePort(Protocol):
     threadpool, never on the event loop (docs/adr/0002). Workers never see
     this port — the FastAPI parent owns all job state.
 
-    Two contracts every implementation must honor:
+    Three contracts every implementation must honor:
 
-    * **Token scoping.** ``get``, ``list_for_token`` and ``delete`` are
-      scoped to the owning token; a wrong ``token_id`` behaves exactly like
-      a missing job (``None``/``False``), so job existence never leaks
-      across tokens (the indistinguishable-404 rule).
+    * **Token scoping.** ``get``, ``get_result``, ``list_for_token`` and
+      ``delete`` are scoped to the owning token; a wrong ``token_id``
+      behaves exactly like a missing job (``None``/``False``), so job
+      existence never leaks across tokens (the indistinguishable-404 rule).
     * **Guarded transitions.** The ``mark_*`` methods are compare-and-set:
       they apply only from the expected prior status and report ``False``
       otherwise — a late transition after a delete or a competing
       transition must be a no-op, never an upsert or an overwrite.
+    * **Metadata/result split.** ``get`` and ``list_for_token`` return
+      metadata-only :class:`Job` snapshots and must not read the stored
+      content; the result blob is written by ``mark_done`` and read back
+      only through ``get_result``, so status polling and listings never
+      pay for stored text (it scales with result size, not job count).
     """
 
     def add(self, job: Job) -> None:
-        """Persist a new job.
+        """Persist a freshly queued job (as minted by ``create_job``).
+
+        Only ``queued`` jobs may enter this way — every later state is
+        reached through the ``mark_*`` transitions. This stands in for the
+        old ``Job``-level "result iff done" invariant: since ``Job`` is
+        metadata-only, admitting a terminal snapshot here would create a
+        ``done`` row that never had a result to store.
 
         Args:
-            job: The job record to store; ``id`` must be unique.
+            job: The job record to store; ``id`` must be unique and
+                ``status`` must be ``queued``.
+
+        Raises:
+            ValueError: ``job`` is not ``queued``.
         """
         ...
 
     def get(self, job_id: str, token_id: str) -> Job | None:
-        """Fetch a job owned by ``token_id``.
+        """Fetch a job's metadata, owned by ``token_id``.
 
         Args:
             job_id: The job's id.
             token_id: The calling token's id — the ownership scope.
 
         Returns:
-            The job, or ``None`` for an unknown id *or* a job owned by a
-            different token (indistinguishable by design).
+            The job (metadata only — see the class docstring), or ``None``
+            for an unknown id *or* a job owned by a different token
+            (indistinguishable by design).
+        """
+        ...
+
+    def get_result(self, job_id: str, token_id: str) -> ParsedDocument | None:
+        """Fetch a done job's stored result, owned by ``token_id``.
+
+        The only read path for stored content — see the metadata/result
+        split in the class docstring.
+
+        Args:
+            job_id: The job's id.
+            token_id: The calling token's id — the ownership scope.
+
+        Returns:
+            The stored result iff the job exists, is owned by ``token_id``
+            and is ``done``; ``None`` otherwise (unknown id, another
+            token's job, or any non-``done`` status — the caller
+            distinguishes those cases via ``get``).
         """
         ...
 
@@ -104,7 +138,8 @@ class JobStorePort(Protocol):
             status: If given, only jobs currently in this state.
 
         Returns:
-            The token's matching jobs; never another token's.
+            The token's matching jobs (metadata only — see the class
+            docstring); never another token's.
         """
         ...
 

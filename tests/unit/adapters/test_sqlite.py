@@ -51,7 +51,6 @@ def make_job(**overrides: object) -> Job:
         "started_at": None,
         "finished_at": None,
         "failure_detail": None,
-        "result": None,
     }
     defaults.update(overrides)
     return Job(**defaults)  # type: ignore[arg-type]
@@ -206,19 +205,47 @@ class TestSqliteJobStore:
         store.add(job)
         assert store.get(job.id, job.token_id) == job
 
-    def test_add_then_get_roundtrip_of_populated_done_snapshot(
+    def test_every_metadata_column_roundtrips_after_transitions(
         self, tmp_path: Path
     ) -> None:
-        """Every column, not just the fresh-queued subset, must roundtrip."""
-        store = SqliteJobStore(tmp_path / "jobs.db")
-        job = make_job(
-            status=JobStatus.DONE,
-            started_at=datetime(2026, 7, 7, 12, 1, tzinfo=UTC),
-            finished_at=datetime(2026, 7, 7, 12, 2, tzinfo=UTC),
-            result=make_result(content="# Full", pages=7, duration_ms=99.25),
-        )
+        """Every metadata column, not just the fresh-queued subset, must
+        roundtrip. Terminal states are reached via transitions — add()
+        accepts only queued jobs."""
+        db = tmp_path / "jobs.db"
+        store = SqliteJobStore(db)
+        job = make_job()
         store.add(job)
-        assert store.get(job.id, job.token_id) == job
+        store.mark_running(job.id)
+        store.mark_failed(job.id, "timeout")
+        found = store.get(job.id, job.token_id)
+        assert found is not None
+        assert found.status is JobStatus.FAILED
+        assert found.started_at is not None
+        assert found.finished_at is not None
+        assert found.failure_detail == "timeout"
+        # A fresh instance re-reads the same row from disk.
+        assert SqliteJobStore(db).get(job.id, job.token_id) == found
+
+    @pytest.mark.parametrize(
+        "job_overrides",
+        [
+            {"status": JobStatus.RUNNING},
+            {"status": JobStatus.DONE},
+            {"status": JobStatus.FAILED, "failure_detail": "timeout"},
+        ],
+        ids=["running", "done", "failed"],
+    )
+    def test_add_rejects_non_queued_job(
+        self, tmp_path: Path, job_overrides: dict[str, object]
+    ) -> None:
+        """Jobs enter only as queued; a terminal snapshot via add would
+        create states the transitions never produce — most dangerously a
+        done row with no stored result."""
+        store = SqliteJobStore(tmp_path / "jobs.db")
+        job = make_job(**job_overrides)
+        with pytest.raises(ValueError, match="queued"):
+            store.add(job)
+        assert store.get(job.id, job.token_id) is None
 
     def test_created_at_is_stored_normalized_to_utc(self, tmp_path: Path) -> None:
         """Non-UTC offsets must not break the lexicographic newest-first order."""
@@ -239,10 +266,9 @@ class TestSqliteJobStore:
         # Roundtrip preserves the instant (datetime equality is offset-aware).
         assert listed[1].created_at == older_plus2.created_at
 
-    def test_get_raises_on_partially_populated_result_columns(
-        self, tmp_path: Path
-    ) -> None:
-        """A hand-edited row must fail loudly, not build a corrupt result."""
+    def test_get_ignores_result_columns(self, tmp_path: Path) -> None:
+        """Metadata reads must not touch stored content: a hand-corrupted
+        result column is invisible to get/list, caught only by get_result."""
         db = tmp_path / "jobs.db"
         store = SqliteJobStore(db)
         job = make_job()
@@ -252,8 +278,24 @@ class TestSqliteJobStore:
                 "UPDATE jobs SET result_content = 'orphan text' WHERE id = ?",
                 (job.id,),
             )
+        assert store.get(job.id, job.token_id) == job
+        assert store.list_for_token(job.token_id) == [job]
+
+    def test_get_result_raises_on_incomplete_result_columns(
+        self, tmp_path: Path
+    ) -> None:
+        """A hand-edited done row must fail loudly, not build a corrupt
+        result — and the error must not quote the stored content."""
+        db = tmp_path / "jobs.db"
+        store = SqliteJobStore(db)
+        job = make_job()
+        store.add(job)
+        store.mark_running(job.id)
+        store.mark_done(job.id, make_result(content="orphan text"))
+        with closing(sqlite3.connect(db)) as conn, conn:
+            conn.execute("UPDATE jobs SET result_pages = NULL WHERE id = ?", (job.id,))
         with pytest.raises(ValueError, match=job.id) as excinfo:
-            store.get(job.id, job.token_id)
+            store.get_result(job.id, job.token_id)
         # Privacy hard rule: the error must not quote the stored content.
         assert "orphan text" not in str(excinfo.value)
 
@@ -277,6 +319,31 @@ class TestSqliteJobStore:
         job = make_job(token_id="a1b2c3d4")
         store.add(job)
         assert store.get(job.id, "0therT0k") is None
+
+    def test_get_result_unknown_id_returns_none(self, tmp_path: Path) -> None:
+        store = SqliteJobStore(tmp_path / "jobs.db")
+        assert store.get_result("deadbeefdeadbeef", "a1b2c3d4") is None
+
+    def test_get_result_with_wrong_token_returns_none(self, tmp_path: Path) -> None:
+        """Cross-token access is indistinguishable from a missing job."""
+        store = SqliteJobStore(tmp_path / "jobs.db")
+        job = make_job(token_id="a1b2c3d4")
+        store.add(job)
+        store.mark_running(job.id)
+        store.mark_done(job.id, make_result())
+        assert store.get_result(job.id, "0therT0k") is None
+
+    @pytest.mark.parametrize("terminal_detail", [None, "timeout"])
+    def test_get_result_on_non_done_job_returns_none(
+        self, tmp_path: Path, terminal_detail: str | None
+    ) -> None:
+        """Queued/running and failed jobs alike expose no result."""
+        store = SqliteJobStore(tmp_path / "jobs.db")
+        job = make_job()
+        store.add(job)
+        if terminal_detail is not None:
+            store.mark_failed(job.id, terminal_detail)
+        assert store.get_result(job.id, job.token_id) is None
 
     def test_mark_running_from_queued(self, tmp_path: Path) -> None:
         store = SqliteJobStore(tmp_path / "jobs.db")
@@ -316,9 +383,9 @@ class TestSqliteJobStore:
         found = store.get(job.id, job.token_id)
         assert found is not None
         assert found.status is JobStatus.DONE
-        assert found.result == result
         assert found.finished_at is not None
         assert found.failure_detail is None
+        assert store.get_result(job.id, job.token_id) == result
 
     def test_mark_done_from_queued_is_refused(self, tmp_path: Path) -> None:
         """A job must pass through running before it can complete."""
@@ -329,7 +396,7 @@ class TestSqliteJobStore:
         found = store.get(job.id, job.token_id)
         assert found is not None
         assert found.status is JobStatus.QUEUED
-        assert found.result is None
+        assert store.get_result(job.id, job.token_id) is None
 
     def test_mark_done_after_delete_is_a_noop(self, tmp_path: Path) -> None:
         """Cancel-vs-complete race: a late result must not resurrect the job."""
@@ -363,7 +430,7 @@ class TestSqliteJobStore:
         assert found is not None
         assert found.status is JobStatus.FAILED
         assert found.failure_detail == "timeout"
-        assert found.result is None
+        assert store.get_result(job.id, job.token_id) is None
 
     def test_mark_failed_never_clobbers_a_done_result(self, tmp_path: Path) -> None:
         store = SqliteJobStore(tmp_path / "jobs.db")
@@ -376,7 +443,7 @@ class TestSqliteJobStore:
         found = store.get(job.id, job.token_id)
         assert found is not None
         assert found.status is JobStatus.DONE
-        assert found.result == result
+        assert store.get_result(job.id, job.token_id) == result
 
     def test_list_for_token_newest_first(self, tmp_path: Path) -> None:
         store = SqliteJobStore(tmp_path / "jobs.db")

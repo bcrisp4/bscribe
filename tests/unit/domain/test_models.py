@@ -27,7 +27,6 @@ def make_job(
     started_at: datetime | None = None,
     finished_at: datetime | None = None,
     failure_detail: str | None = None,
-    result: ParsedDocument | None = None,
 ) -> Job:
     """Build a Job with sensible defaults (a freshly queued job)."""
     return Job(
@@ -40,7 +39,6 @@ def make_job(
         started_at=started_at,
         finished_at=finished_at,
         failure_detail=failure_detail,
-        result=result,
     )
 
 
@@ -109,12 +107,11 @@ class TestJob:
         assert job.started_at is None
         assert job.finished_at is None
         assert job.failure_detail is None
-        assert job.result is None
 
-    def test_done_job_carries_result(self) -> None:
-        result = make_parsed_document()
-        job = make_job(status=JobStatus.DONE, result=result)
-        assert job.result == result
+    def test_is_metadata_only(self) -> None:
+        # Results never ride on Job — they are read only via the store's
+        # get_result, so status/list reads never pay for the content blob.
+        assert not hasattr(make_job(status=JobStatus.DONE), "result")
 
     def test_is_frozen(self) -> None:
         job = make_job()
@@ -133,19 +130,10 @@ class TestJob:
         assert job.started_at is None
         assert job.finished_at is None
         assert job.failure_detail is None
-        assert job.result is None
-
-    def test_done_without_result_is_rejected(self) -> None:
-        with pytest.raises(ValueError, match="done"):
-            make_job(status=JobStatus.DONE, result=None)
 
     def test_failed_without_detail_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="failed"):
             make_job(status=JobStatus.FAILED, failure_detail=None)
-
-    def test_result_on_non_done_job_is_rejected(self) -> None:
-        with pytest.raises(ValueError, match="result"):
-            make_job(status=JobStatus.RUNNING, result=make_parsed_document())
 
     def test_failure_detail_on_non_failed_job_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="failure_detail"):
