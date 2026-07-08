@@ -14,7 +14,7 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from bscribe.domain.models import (
     Job,
@@ -273,13 +273,25 @@ def _stamp_from_json(job_id: str, text: str | None) -> PipelineStamp | None:
     except json.JSONDecodeError as exc:
         msg = f"job {job_id}: result_pipeline is not valid JSON"
         raise ValueError(msg) from exc
-    try:
-        return PipelineStamp(
-            fingerprint=data["fingerprint"], components=data["components"]
-        )
-    except (KeyError, TypeError) as exc:
-        msg = f"job {job_id}: result_pipeline has an unexpected shape"
-        raise ValueError(msg) from exc
+    shape_error = ValueError(f"job {job_id}: result_pipeline has an unexpected shape")
+    if not isinstance(data, dict):
+        raise shape_error
+    obj = cast("dict[str, object]", data)
+    fingerprint = obj.get("fingerprint")
+    components = obj.get("components")
+    if not isinstance(fingerprint, str):
+        raise shape_error
+    if not isinstance(components, dict):
+        raise shape_error
+    components_obj = cast("dict[object, object]", components)
+    if not all(
+        isinstance(key, str) and isinstance(value, str)
+        for key, value in components_obj.items()
+    ):
+        raise shape_error
+    return PipelineStamp(
+        fingerprint=fingerprint, components=cast("dict[str, str]", components_obj)
+    )
 
 
 def _row_to_token(row: tuple[str, str, str, str]) -> Token:

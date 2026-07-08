@@ -759,6 +759,18 @@ class TestPipelineStampPersistence:
             pytest.param("{}", id="empty_object"),
             pytest.param("null", id="json_null"),
             pytest.param('{"fingerprint":"x"}', id="missing_components"),
+            pytest.param(
+                '{"fingerprint":"x","components":"not-a-map"}',
+                id="components_not_a_map",
+            ),
+            pytest.param(
+                '{"fingerprint":1,"components":{}}', id="fingerprint_not_a_string"
+            ),
+            pytest.param(
+                '{"fingerprint":"x","components":{"a":1}}',
+                id="component_value_not_a_string",
+            ),
+            pytest.param("[]", id="json_array"),
         ],
     )
     def test_get_result_raises_on_malformed_pipeline_json(

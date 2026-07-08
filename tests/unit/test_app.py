@@ -101,6 +101,28 @@ async def test_default_pipeline_info_runs_discovery(
     assert app.state.pipeline_info is CANNED_PIPELINE_STAMP
 
 
+async def test_logging_configured_before_pipeline_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Discovery probes may warn on failure; those warnings must go through
+    structlog only after it's configured, or they'd emit unstructured."""
+    call_order: list[str] = []
+
+    def _fake_configure_logging(_level: str) -> None:
+        call_order.append("configure_logging")
+
+    def _fake_discover() -> object:
+        call_order.append("discover_pipeline")
+        return CANNED_PIPELINE_STAMP
+
+    monkeypatch.setattr("bscribe.app.configure_logging", _fake_configure_logging)
+    monkeypatch.setattr("bscribe.app.discover_pipeline", _fake_discover)
+
+    create_app(pipeline_info=None)
+
+    assert call_order == ["configure_logging", "discover_pipeline"]
+
+
 async def test_unknown_path_returns_problem_json() -> None:
     """Error handlers are wired: 404 comes back as application/problem+json."""
     async with make_client() as client:

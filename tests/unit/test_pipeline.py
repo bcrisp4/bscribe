@@ -149,8 +149,11 @@ class TestLibreOfficeProbe:
         _discover_libreoffice()
 
         assert captured[0][0] == "soffice"
+        # Path.as_uri() on an absolute POSIX path yields a triple-slash
+        # ``file:///...`` URI, not the bare ``file://`` prefix an f-string
+        # would produce.
         assert any(
-            arg.startswith("-env:UserInstallation=file://") for arg in captured[0]
+            arg.startswith("-env:UserInstallation=file:///") for arg in captured[0]
         )
 
     def test_unwritable_tmpdir_is_unavailable(

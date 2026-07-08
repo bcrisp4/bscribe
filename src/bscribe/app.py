@@ -60,10 +60,12 @@ def create_app(
     """
     if settings is None:
         settings = Settings()
+    # Probes inside discover_pipeline may warn on failure, so logging must
+    # be configured before discovery runs — otherwise those warnings emit
+    # with unconfigured structlog (not JSON).
+    configure_logging(settings.log_level)
     if pipeline_info is None:
         pipeline_info = discover_pipeline()
-
-    configure_logging(settings.log_level)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None]:

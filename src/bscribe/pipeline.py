@@ -263,10 +263,13 @@ def _discover_libreoffice() -> str:
     """
     try:
         with tempfile.TemporaryDirectory() as user_installation_dir:
+            # Path.as_uri() percent-encodes unusual TMPDIR characters; the
+            # f-string form was already canonical for plain paths.
+            profile_uri = Path(user_installation_dir).as_uri()
             argv = [
                 "soffice",
                 "--version",
-                f"-env:UserInstallation=file://{user_installation_dir}",
+                f"-env:UserInstallation={profile_uri}",
             ]
             return _probe(Component.LIBREOFFICE, argv, _LIBREOFFICE_PATTERN)
     except OSError as exc:
