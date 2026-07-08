@@ -94,6 +94,30 @@ class TestStartupSweep:
         assert scratch_dir.is_dir()
         assert list(scratch_dir.iterdir()) == []
 
+    def test_wipe_failure_logged_but_boot_proceeds(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A genuine wipe failure (not just a missing dir) must not abort
+        boot, but must leave an operator-visible log line: uploads may
+        have survived the documented startup wipe."""
+        store = FakeJobStore()
+        scratch_dir = tmp_path / "scratch"
+        scratch_dir.mkdir()
+
+        def _denied(path: Path) -> None:
+            raise PermissionError(13, "denied")
+
+        monkeypatch.setattr("bscribe.maintenance.shutil.rmtree", _denied)
+
+        count = startup_sweep(store, scratch_dir)
+
+        assert count == 0
+        assert scratch_dir.is_dir()
+        assert "scratch_wipe_error" in capsys.readouterr().out
+
     def test_missing_scratch_dir_created_without_error(self, tmp_path: Path) -> None:
         store = FakeJobStore()
         scratch_dir = tmp_path / "does-not-exist-yet"
@@ -169,7 +193,9 @@ async def _wait_for(predicate: Callable[[], bool]) -> None:
 
 
 class TestPurgeLoop:
-    async def test_purges_immediately_before_first_sleep(self) -> None:
+    async def test_purges_immediately_then_cancellation_propagates(self) -> None:
+        """First purge happens before any sleep; cancelling the sleeping
+        loop propagates CancelledError (not swallowed by its except)."""
         store = RecordingPurgeStore()
         task = asyncio.create_task(
             purge_loop(store, ttl_seconds=3600, interval_seconds=3600)
@@ -181,26 +207,17 @@ class TestPurgeLoop:
             await task
         assert task.cancelled()
 
-    async def test_survives_store_error_and_keeps_running(self) -> None:
+    async def test_survives_store_error_and_keeps_running(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         store = FlakyPurgeStore()
         task = asyncio.create_task(
             purge_loop(store, ttl_seconds=3600, interval_seconds=0)
         )
         await _wait_for(lambda: store.calls >= 2)
         assert not task.done()
+        assert "job_purge_error" in capsys.readouterr().out
 
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-
-    async def test_cancellation_propagates(self) -> None:
-        store = RecordingPurgeStore()
-        task = asyncio.create_task(
-            purge_loop(store, ttl_seconds=3600, interval_seconds=3600)
-        )
-        await _wait_for(lambda: len(store.calls) >= 1)
-
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        assert task.cancelled()

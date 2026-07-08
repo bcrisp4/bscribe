@@ -92,9 +92,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             app.state.purge_task.cancel()
             await asyncio.gather(app.state.purge_task, return_exceptions=True)
             # Runner next: cancelling its tasks kills their running
-            # workers via the still-live pool, then the pool tears down.
-            await app.state.job_runner.aclose()
-            await pool.aclose()
+            # workers via the still-live pool, then the pool tears down —
+            # unconditionally, so a runner teardown error can't leak
+            # worker processes.
+            try:
+                await app.state.job_runner.aclose()
+            finally:
+                await pool.aclose()
 
     app = FastAPI(title="bscribe", lifespan=lifespan)
     app.state.settings = settings

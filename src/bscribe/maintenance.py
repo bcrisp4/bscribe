@@ -49,9 +49,15 @@ def startup_sweep(store: JobStorePort, scratch_dir: Path) -> int:
         The number of jobs transitioned to failed.
     """
     count = store.sweep_incomplete(INTERRUPTED_BY_RESTART_DETAIL)
-    # ignore_errors=True: the dir may not exist yet (first boot, or an
-    # already-clean container) — that is not itself a failure to log.
-    shutil.rmtree(scratch_dir, ignore_errors=True)
+    try:
+        shutil.rmtree(scratch_dir)
+    except FileNotFoundError:
+        # First boot or an already-clean container — nothing to wipe.
+        pass
+    except OSError as exc:
+        # Boot proceeds, but a wipe failure means orphaned uploads may
+        # have survived the documented startup wipe — say so, loudly.
+        logger.warning("scratch_wipe_error", error_type=type(exc).__name__)
     scratch_dir.mkdir(parents=True, exist_ok=True)
     logger.info("startup_sweep", jobs_failed=count)  # every boot, even 0
     return count
@@ -99,6 +105,14 @@ async def purge_loop(
         except Exception as exc:
             # Except Exception deliberately excludes CancelledError (a
             # BaseException): cancellation must propagate so the owning
-            # lifespan can actually stop the loop on shutdown.
-            logger.error("job_purge_error", error_type=type(exc).__name__)
+            # lifespan can actually stop the loop on shutdown. Never
+            # str(exc) (privacy rule); sqlite_errorname is duck-typed off
+            # sqlite3 exceptions — a fixed constant vocabulary (e.g.
+            # SQLITE_BUSY) that diagnoses the realistic failure class
+            # without free text or an adapter import here.
+            logger.error(
+                "job_purge_error",
+                error_type=type(exc).__name__,
+                sqlite_error=getattr(exc, "sqlite_errorname", None),
+            )
         await asyncio.sleep(interval_seconds)
