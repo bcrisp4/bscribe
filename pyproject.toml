@@ -9,7 +9,7 @@ dynamic = ["version"]
 dependencies = [
     "anyio",
     "fastapi",
-    "liteparse>=2.4.0",
+    "liteparse>=2.5.0",
     "pebble>=5.2",
     "pydantic-settings>=2.14.2",
     "python-multipart>=0.0.18",
