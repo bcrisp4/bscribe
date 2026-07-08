@@ -16,6 +16,8 @@ Status: M1 shipped (v0.1.0 — sync `/v1/convert`, bearer auth, CLI, hardened mu
 
 **GitHub issues = source of truth for all work tracking.** Milestones M1–M4 mirror the design-doc milestones; every work item is an issue attached to one (`gh issue list --milestone "M1 — sync converter"`). Before starting work, find (or create) the issue; reference it in PRs (`Closes #N`). Don't track work in TODO files, the design doc, or anywhere else — scope/dependency changes get recorded on the issue itself.
 
+Before implementing an issue, grep `src/` and `tests/` for `#<issue-number>` — seams are often pre-wired with forward-reference comments (e.g. #18's cancellation hook existed before its endpoint).
+
 ## GitHub repo settings
 
 `main` protected: required checks must pass before merge, GitHub auto-merge disabled. All checks must be green before a PR can merge, but green CI is **not** merge authorization — only merge PRs with explicit, per-PR consent from the user (who also reviews, alongside Copilot). Merge command: `gh pr merge --squash --delete-branch`. Conflicted dependabot PR → comment `@dependabot rebase` (still supported; merge/close comment commands deprecated 2026-01).
@@ -60,6 +62,8 @@ Planned shape (per design doc; most lands M1–M3):
 - **API contract.** Path-versioned (`/v1`). Breaking change requires `/v2`. Errors = RFC 9457 `application/problem+json`. Status-code table in design doc = contract.
 - **Privacy hard rule.** Document content + extracted text never logged, any level. Filenames only at DEBUG. Logging = structlog JSON, data as keyword arguments, never f-strings.
 - **liteparse quirks** (verified 2.4.0): always construct with `quiet=True` (native stdout corrupts JSON logs); OCR control is boolean `ocr_enabled` only, no force mode; sole exception `ParseError` — message may quote document internals, never propagate it; `text` output preserves spatial layout (space-padded columns). **OCR is not bundled** — the `tesseract-rs` binding downloads `eng.traineddata` (tessdata_best) from GitHub to `$HOME/.tesseract-rs` on first OCR; the container bakes it at build (pinned commit+sha256) so OCR runs offline under read-only rootfs / non-root (see Dockerfile). **SVG on the Debian IM6 image** renders via librsvg (`rsvg-convert`, needs `librsvg2-bin`), not IM's internal MSVG — missing it → SVG uploads `422`; `gs` is only liteparse's presence-gate for svg/eps/ps/ai, not the SVG renderer.
+- **pebble quirks** (verified 5.2.0): worker stop = SIGTERM → 3s grace → SIGKILL, never plain "SIGKILL"; `ProcessFuture.cancel()` returns True for pool-queued (pending) futures too — the cancellations metric counts effective cancellations, not worker kills.
+- **uvicorn** (verified 0.50): client disconnect does **not** cancel the handler task, only suppresses response writes — no handler-cancelled-mid-await disconnect races on this stack (`submit_job`'s defensive comment predates this finding).
 
 ## ADRs
 
