@@ -87,8 +87,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             yield
         finally:
-            # Purge task first: cancel it before tearing down the runner
-            # and pool so it never touches either mid-shutdown.
+            # Purge task first: cancellation stops any further iterations.
+            # An iteration already inside to_thread cannot be interrupted
+            # and may finish in the background — harmless: it only issues
+            # the store's guarded DELETE (safe concurrently with anything,
+            # as in normal serving), and executor threads are joined at
+            # interpreter exit, so no write is ever torn by process death.
             app.state.purge_task.cancel()
             await asyncio.gather(app.state.purge_task, return_exceptions=True)
             # Runner next: cancelling its tasks kills their running
