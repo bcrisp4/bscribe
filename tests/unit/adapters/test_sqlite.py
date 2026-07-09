@@ -18,6 +18,7 @@ from bscribe.domain.models import (
     OcrMode,
     OutputFormat,
     ParsedDocument,
+    PipelineStamp,
     Token,
 )
 from bscribe.domain.ports import JobStorePort, TokenStorePort
@@ -694,3 +695,197 @@ class TestSqliteJobStore:
             store.purge_older_than(datetime(2026, 7, 1))  # noqa: DTZ001
         # Just a datetime guard, not a document-content-bearing error.
         assert "job" not in str(excinfo.value)
+
+
+class TestPipelineStampPersistence:
+    """SQLite persistence for PipelineStamp (#20 T4)."""
+
+    def make_stamp(self, **overrides: object) -> PipelineStamp:
+        """PipelineStamp factory with sensible defaults."""
+        defaults: dict[str, object] = {
+            "fingerprint": "0123456789ab",
+            "components": {"liteparse": "2.5.0", "bscribe": "0.3.0"},
+        }
+        defaults.update(overrides)
+        return PipelineStamp(**defaults)  # type: ignore[arg-type]
+
+    def test_mark_done_then_get_result_roundtrips_stamp(self, tmp_path: Path) -> None:
+        store = SqliteJobStore(tmp_path / "jobs.db")
+        job = make_job()
+        store.add(job)
+        store.mark_running(job.id)
+        stamp = self.make_stamp()
+        store.mark_done(job.id, make_result(pipeline=stamp))
+        found = store.get_result(job.id, job.token_id)
+        assert found is not None
+        assert found.pipeline == stamp
+
+    def test_mark_done_with_no_stamp_stores_null_and_reads_back_none(
+        self, tmp_path: Path
+    ) -> None:
+        store = SqliteJobStore(tmp_path / "jobs.db")
+        job = make_job()
+        store.add(job)
+        store.mark_running(job.id)
+        store.mark_done(job.id, make_result(pipeline=None))
+        found = store.get_result(job.id, job.token_id)
+        assert found is not None
+        assert found.pipeline is None
+
+    def test_get_result_treats_null_result_pipeline_on_done_row_as_legitimate(
+        self, tmp_path: Path
+    ) -> None:
+        """NULL result_pipeline on a done row is a legitimate pre-upgrade or
+        never-stamped row — unlike a NULL content/pages/duration_ms, it must
+        not trigger the corrupt-done-row error path."""
+        db = tmp_path / "jobs.db"
+        store = SqliteJobStore(db)
+        job = make_job()
+        store.add(job)
+        store.mark_running(job.id)
+        store.mark_done(job.id, make_result(pipeline=self.make_stamp()))
+        with closing(sqlite3.connect(db)) as conn, conn:
+            conn.execute(
+                "UPDATE jobs SET result_pipeline = NULL WHERE id = ?", (job.id,)
+            )
+        found = store.get_result(job.id, job.token_id)
+        assert found is not None
+        assert found.pipeline is None
+
+    @pytest.mark.parametrize(
+        "stored_value",
+        [
+            pytest.param("not json", id="unparseable"),
+            pytest.param("{}", id="empty_object"),
+            pytest.param("null", id="json_null"),
+            pytest.param('{"fingerprint":"x"}', id="missing_components"),
+            pytest.param(
+                '{"fingerprint":"x","components":"not-a-map"}',
+                id="components_not_a_map",
+            ),
+            pytest.param(
+                '{"fingerprint":1,"components":{}}', id="fingerprint_not_a_string"
+            ),
+            pytest.param(
+                '{"fingerprint":"x","components":{"a":1}}',
+                id="component_value_not_a_string",
+            ),
+            pytest.param("[]", id="json_array"),
+        ],
+    )
+    def test_get_result_raises_on_malformed_pipeline_json(
+        self, tmp_path: Path, stored_value: str
+    ) -> None:
+        """A hand-edited, unparseable *or* wrong-shaped result_pipeline must
+        fail loudly, like the corrupt-row path for the other result
+        columns — whether it's not valid JSON at all, or valid JSON
+        missing the fields a stamp requires."""
+        db = tmp_path / "jobs.db"
+        store = SqliteJobStore(db)
+        job = make_job()
+        store.add(job)
+        store.mark_running(job.id)
+        store.mark_done(job.id, make_result(pipeline=self.make_stamp()))
+        with closing(sqlite3.connect(db)) as conn, conn:
+            conn.execute(
+                "UPDATE jobs SET result_pipeline = ? WHERE id = ?",
+                (stored_value, job.id),
+            )
+        with pytest.raises(ValueError, match=job.id):
+            store.get_result(job.id, job.token_id)
+
+    def test_stored_json_has_canonically_sorted_component_keys(
+        self, tmp_path: Path
+    ) -> None:
+        db = tmp_path / "jobs.db"
+        store = SqliteJobStore(db)
+        job = make_job()
+        store.add(job)
+        store.mark_running(job.id)
+        stamp = self.make_stamp(
+            components={"liteparse": "2.5.0", "bscribe": "0.3.0", "pdfium": "1.0"}
+        )
+        store.mark_done(job.id, make_result(pipeline=stamp))
+        with closing(sqlite3.connect(db)) as conn:
+            (raw,) = conn.execute(
+                "SELECT result_pipeline FROM jobs WHERE id = ?", (job.id,)
+            ).fetchone()
+        assert raw == (
+            '{"fingerprint":"0123456789ab",'
+            '"components":{"bscribe":"0.3.0","liteparse":"2.5.0","pdfium":"1.0"}}'
+        )
+
+    def test_migration_to_v4_adds_result_pipeline_column_and_old_rows_read_none(
+        self, tmp_path: Path
+    ) -> None:
+        """A v3 database (pre-#20) upgrades in place; its done rows are
+        readable with pipeline=None, not treated as corrupt."""
+        db = tmp_path / "bscribe.db"
+        # closing(), not the connection context manager: the latter only
+        # commits and would leave a WAL handle open under the migration.
+        with closing(sqlite3.connect(db, autocommit=True)) as conn:
+            # Replica of the pre-#20 schema as shipped (migrations 1-3).
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute(
+                """
+                CREATE TABLE tokens (
+                    id          TEXT PRIMARY KEY,
+                    label       TEXT NOT NULL,
+                    secret_hash TEXT NOT NULL UNIQUE,
+                    created_at  TEXT NOT NULL
+                ) STRICT
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE jobs (
+                    id                 TEXT PRIMARY KEY,
+                    token_id           TEXT NOT NULL,
+                    output             TEXT NOT NULL,
+                    ocr                TEXT NOT NULL,
+                    status             TEXT NOT NULL
+                        CHECK (status IN ('queued', 'running', 'done', 'failed')),
+                    failure_detail     TEXT,
+                    created_at         TEXT NOT NULL,
+                    started_at         TEXT,
+                    finished_at        TEXT,
+                    result_content     TEXT,
+                    result_pages       INTEGER,
+                    result_duration_ms REAL
+                ) STRICT
+                """
+            )
+            conn.execute(
+                "CREATE INDEX jobs_token_created ON jobs (token_id, created_at DESC)"
+            )
+            conn.execute(
+                "INSERT INTO jobs (id, token_id, output, ocr, status, created_at,"
+                " started_at, finished_at, result_content, result_pages,"
+                " result_duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "abcd1234abcd1234",
+                    "a1b2c3d4",
+                    "markdown",
+                    "auto",
+                    "done",
+                    datetime(2026, 7, 7, 12, 0, tzinfo=UTC).isoformat(),
+                    datetime(2026, 7, 7, 12, 0, tzinfo=UTC).isoformat(),
+                    datetime(2026, 7, 7, 12, 1, tzinfo=UTC).isoformat(),
+                    "pre-existing content",
+                    2,
+                    100.0,
+                ),
+            )
+            conn.execute("PRAGMA user_version = 3")
+
+        store = SqliteJobStore(db)
+        with closing(sqlite3.connect(db)) as conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
+            assert "result_pipeline" in columns
+            (version,) = conn.execute("PRAGMA user_version").fetchone()
+            assert version == 4
+
+        found = store.get_result("abcd1234abcd1234", "a1b2c3d4")
+        assert found is not None
+        assert found.content == "pre-existing content"
+        assert found.pipeline is None

@@ -19,12 +19,15 @@ from bscribe.errors import (
     register_error_handlers,
 )
 from bscribe.log import configure_logging
+from bscribe.pipeline import discover_pipeline
 from bscribe.runner import JobRunner
 from bscribe.settings import Settings
 from bscribe.workers import WorkerPool
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable
+
+    from bscribe.domain import PipelineStamp
 
 logger = structlog.get_logger()
 
@@ -36,12 +39,19 @@ logger = structlog.get_logger()
 MULTIPART_OVERHEAD_SLACK = 1 << 20
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None, pipeline_info: PipelineStamp | None = None
+) -> FastAPI:
     """Build and return the bscribe FastAPI application.
 
     Args:
         settings: Application configuration; ``None`` loads it from
             ``BSCRIBE_``-prefixed environment variables.
+        pipeline_info: The app-wide pipeline fingerprint/component stamp;
+            ``None`` runs real discovery (:func:`bscribe.pipeline.discover_pipeline`
+            — cached process-wide, so repeated calls in one process are
+            cheap after the first). Tests pass a canned stamp to avoid the
+            real subprocess probes.
 
     Returns:
         A configured FastAPI instance exposing ``/healthz`` and the
@@ -50,8 +60,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     """
     if settings is None:
         settings = Settings()
-
+    # Probes inside discover_pipeline may warn on failure, so logging must
+    # be configured before discovery runs — otherwise those warnings emit
+    # with unconfigured structlog (not JSON).
     configure_logging(settings.log_level)
+    if pipeline_info is None:
+        pipeline_info = discover_pipeline()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
@@ -74,6 +88,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             worker_count=settings.worker_count,
             job_timeout_seconds=float(settings.job_timeout_seconds),
             worker_max_tasks=settings.worker_max_tasks,
+            pipeline_info=app.state.pipeline_info,
         )
         app.state.worker_pool = pool
         app.state.purge_task = asyncio.create_task(
@@ -118,6 +133,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # endpoint passes the pair it resolved per request, so swapping either
     # on app.state can never split writes between two stores.
     app.state.job_runner = JobRunner()
+    # Factory-time too, same rationale as token_store/job_store above: the
+    # lifespan below builds the WorkerPool from whatever is on app.state,
+    # and ASGITransport tests never run the lifespan, so the stamp has to
+    # be here already for those tests' pools (constructed directly, not via
+    # create_app) to have something to read.
+    app.state.pipeline_info = pipeline_info
+    # One INFO line per process at discovery time — version strings and a
+    # fingerprint hash only, no document data, so this is privacy-safe at
+    # INFO (see docs/design.md — Privacy).
+    logger.info(
+        "pipeline_discovered",
+        fingerprint=pipeline_info.fingerprint,
+        components=dict(pipeline_info.components),
+    )
     # Ensure the upload scratch dir exists once here rather than on every
     # request. This mkdir stays for lifespan-less ASGITransport tests,
     # which never run the lifespan below; the lifespan's startup_sweep

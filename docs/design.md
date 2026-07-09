@@ -5,7 +5,7 @@
 | Author | Ben Crisp (ben@thecrisp.io) |
 | Status | Draft |
 | Created | 2026-07-05 |
-| Updated | 2026-07-07 |
+| Updated | 2026-07-08 |
 
 ## Objective
 
@@ -206,12 +206,31 @@ Status code usage (audited against RFC 9110; the pattern for async polling follo
 
 ### Re-ingestion contract
 
-bscribe stays stateless — it never remembers what it parsed. Each result's `pipeline.components` map lists the components the document **actually traversed**, with versions: a born-digital PDF traverses bscribe + liteparse + PDFium; a scan adds Tesseract; a `.docx` adds LibreOffice; an image adds ImageMagick. The `fingerprint` is a hash over *all* output-affecting component versions and config (including OCR model/language data), whether or not a given document used them.
+bscribe stays stateless — it never remembers what it parsed. Each result's `pipeline.components` map lists the components the document **actually traversed**, with versions: a born-digital PDF traverses bscribe + liteparse + PDFium; a `.docx` adds LibreOffice; an image adds ImageMagick (an SVG adds librsvg as well — ImageMagick still runs; librsvg is its SVG render delegate — see Security). The `fingerprint` is a hash over *all* output-affecting component versions and config, whether or not a given document used them.
+
+**OCR traversal is a request-param proxy, not a content inspection.** liteparse exposes no ocr-applied signal on `ParseResult` (verified against 2.5.0 — see Closed issues); routing is purely extension-based. So a document's traversed path derives from `(extension, ocr request param)`: `ocr=auto` puts Tesseract + tessdata on the path — an over-report, since a born-digital PDF parsed with `ocr=auto` lists them even though OCR never ran; `ocr=off` excludes them regardless of content. Consequence: an OCR/tessdata version bump re-parses every `ocr=auto` document in a caller's corpus, contributing or not; an `ocr=off` document never re-parses on an OCR bump. Accepted — the design already tolerates unnecessary re-parses (below), and doing better would need the same `is_complex()` pre-check pass already rejected for `ocr_used` (see Closed issues).
+
+**Component vocabulary** (nine keys, always present in the fingerprint hash regardless of what a given document traversed):
+
+| Component | Version source |
+|---|---|
+| `bscribe`, `liteparse` | `importlib.metadata` |
+| `pdfium`, `tesseract` | Derived string `bundled (liteparse <version>)` — both are compile-time constants inside the liteparse wheel, not queryable at runtime; the string still changes correctly, since either only changes when the wheel does |
+| `tessdata` | `sha256:<first 12 hex>` digest of the baked traineddata file(s) |
+| `imagemagick`, `libreoffice`, `ghostscript`, `librsvg` | Subprocess version probe (`convert` with `magick` fallback, `soffice`, `gs`, `rsvg-convert`) at startup |
+
+`ghostscript` is fingerprint-only — it never appears on a traversed path. liteparse uses `gs` purely as a presence gate for svg/eps/ps/ai inputs, and of that group bscribe accepts only SVG, whose actual render goes through librsvg on the container's Debian IM6 image (see Security) — so a `gs` bump cannot change output for any accepted format. It stays in the global fingerprint as cheap over-inclusion: a bump costs one fingerprint miss and a per-document check that re-parses nothing, whereas dropping a component that later turns out to matter would silently skip re-parses.
+
+A probe that fails at startup (missing binary, subprocess error) degrades that component's version to the sentinel string `unavailable` rather than failing discovery; `unavailable` hashes into the fingerprint like any other version string, so a caller comparing per-component versions on a stored traversed path still sees the change when a previously-missing tool appears (or disappears).
+
+**Fingerprint canonicalization:** sort the nine `key=version` pairs by key, join with `\n`, sha256, first 12 hex chars — matching the `fingerprint` sample earlier in this doc. No deployment config currently joins the hash; the first one that will is the M4 OCR endpoint/model identity (an output-affecting config change must be visible to the fingerprint short-circuit), so that join is a design commitment for M4, not an implementation detail to rediscover then.
 
 Callers (bsearch) store the whole `pipeline` block alongside each ingested document. On each ingest cycle:
 
 1. Stored fingerprint == `GET /v1/info` fingerprint → nothing changed anywhere, done.
-2. Otherwise, per document, one uniform rule: **re-parse if any component on the document's stored path has a different current version.** OCR bumps never touch born-digital documents, LibreOffice bumps touch only office documents — no special cases per format.
+2. Otherwise, per document, one uniform rule: **re-parse if any component on the document's stored path has a different current version.** OCR bumps never touch `ocr=off` documents, LibreOffice bumps touch only office documents — no special cases per format.
+
+`bscribe` itself sits on every traversed path, so any bscribe release forces a full-corpus re-parse for callers following this contract. Accepted at single-user scale, but worth stating explicitly: it's the component most likely to change often.
 
 An `ocr_used` quality signal (OCR text may deserve less trust downstream) is deferred — liteparse does not report it and deriving it proved costly (see Closed issues). It would carry no re-ingestion logic; adding it later is additive. Occasional unnecessary re-parses — a traversed component bumped without changing output for that document — are accepted at single-user scale.
 

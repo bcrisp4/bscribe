@@ -26,7 +26,7 @@ from bscribe.errors import (
     WORKER_CRASHED_DETAIL,
 )
 from bscribe.runner import JobRunner
-from tests.unit.fakes import FakeJobStore, GatedPool
+from tests.unit.fakes import CANNED_PIPELINE_STAMP, FakeJobStore, GatedPool
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -89,7 +89,10 @@ class TestJobRunnerHappyPath:
         await runner.drain()
         assert store.jobs[job.id].status is JobStatus.DONE
         assert store.get_result(job.id, job.token_id) == ParsedDocument(
-            content="# Heading", pages=3, duration_ms=41.7
+            content="# Heading",
+            pages=3,
+            duration_ms=41.7,
+            pipeline=CANNED_PIPELINE_STAMP,
         )
 
     async def test_upload_deleted_after_success(self, tmp_path: Path) -> None:

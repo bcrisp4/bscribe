@@ -7,7 +7,50 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from datetime import datetime
+
+
+class Component(StrEnum):
+    """Pipeline component identity; values are the wire/fingerprint keys."""
+
+    BSCRIBE = "bscribe"
+    LITEPARSE = "liteparse"
+    PDFIUM = "pdfium"
+    TESSERACT = "tesseract"
+    TESSDATA = "tessdata"
+    IMAGEMAGICK = "imagemagick"
+    LIBREOFFICE = "libreoffice"
+    GHOSTSCRIPT = "ghostscript"
+    LIBRSVG = "librsvg"
+
+
+@dataclass(frozen=True, slots=True)
+class PipelineStamp:
+    """A pipeline fingerprint plus the component versions behind it.
+
+    One type serves two roles: the app-wide identity (``components`` covers
+    all nine :class:`Component` values, as discovered at startup) and a
+    parse result's traversed subset (``components`` filtered to only what
+    that document went through — see
+    :func:`bscribe.domain.pipeline.traversed_stamp`). Both share the same
+    ``fingerprint``, since it hashes the full app-wide set regardless of
+    what any one document traversed (docs/design.md, Re-ingestion contract).
+
+    ``components`` is a plain ``str``-keyed mapping rather than
+    ``Component``-keyed: stamps round-trip through storage (SQLite), and a
+    str-keyed shape tolerates an unrecognized or since-removed component key
+    on read without raising, instead of a strict enum lookup that would.
+
+    Attributes:
+        fingerprint: Twelve lowercase hex characters — see
+            :func:`bscribe.domain.pipeline.compute_fingerprint`.
+        components: Component wire key -> version string, e.g.
+            ``{"bscribe": "0.3.0", "liteparse": "2.5.0"}``.
+    """
+
+    fingerprint: str
+    components: Mapping[str, str]
 
 
 class OutputFormat(StrEnum):
@@ -43,11 +86,17 @@ class ParsedDocument:
         content: Extracted text in the requested output format.
         pages: Number of pages in the parsed document.
         duration_ms: Wall-clock parse duration in milliseconds.
+        pipeline: The components-traversed stamp as of parse time (see
+            :class:`PipelineStamp`). ``None`` for results stored before this
+            feature existed, or not yet stamped — stamping happens
+            parent-side in ``WorkerPool``, not inside the worker process
+            that produces this ``ParsedDocument``.
     """
 
     content: str
     pages: int
     duration_ms: float
+    pipeline: PipelineStamp | None = None
 
 
 class JobStatus(StrEnum):
