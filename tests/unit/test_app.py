@@ -297,6 +297,27 @@ async def test_lifespan_starts_and_stops_metrics_server(
     assert shutdowns == [None]
 
 
+async def test_lifespan_metrics_bind_failure_still_tears_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A metrics-port bind failure at startup must not leak the purge task or
+    worker pool — the server is started inside the try so the finally runs."""
+
+    def _boom(*_args: object, **_kwargs: object) -> tuple[object, None]:
+        raise OSError("metrics port already in use")
+
+    monkeypatch.setattr("bscribe.app.start_http_server", _boom)
+    app = create_app(Settings(metrics_enabled=True))
+
+    with pytest.raises(OSError, match="metrics port"):
+        async with app.router.lifespan_context(app):
+            pass
+
+    # Teardown ran: purge task cancelled, pool closed (close() is idempotent).
+    assert app.state.purge_task.done()
+    app.state.worker_pool.close()
+
+
 async def test_lifespan_skips_metrics_server_when_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

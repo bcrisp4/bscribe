@@ -106,15 +106,17 @@ def create_app(
         # Expose metrics on their own port via prometheus-client's background
         # WSGI server (a daemon thread), not a route on this app — the scrape
         # surface stays off the API port (docs/design.md — Monitoring). The
-        # server reads the per-app registry built at factory time.
+        # server reads the per-app registry built at factory time. Started
+        # inside the try so a bind failure (e.g. port in use) still runs the
+        # finally teardown below — the purge task and pool already exist.
         metrics_server = None
-        if settings.metrics_enabled:
-            metrics_server, _ = start_http_server(
-                settings.metrics_port,
-                addr=settings.metrics_addr,
-                registry=app.state.metrics_registry,
-            )
         try:
+            if settings.metrics_enabled:
+                metrics_server, _ = start_http_server(
+                    settings.metrics_port,
+                    addr=settings.metrics_addr,
+                    registry=app.state.metrics_registry,
+                )
             yield
         finally:
             if metrics_server is not None:

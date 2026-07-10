@@ -57,9 +57,24 @@ class _MetricsSource(Protocol):
 
 
 # Parse latency spans well past prometheus-client's 10s default top bucket
-# (a large scanned PDF under OCR can take tens of seconds), so the histogram
-# uses explicit buckets up to the typical job-timeout ceiling.
-_JOB_DURATION_BUCKETS = (0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0)
+# (a large scanned PDF under OCR can take minutes), so the histogram uses
+# explicit buckets from sub-second up to 600s — the default
+# job_timeout_seconds ceiling — keeping latency near the timeout resolvable
+# rather than collapsed into +Inf.
+_JOB_DURATION_BUCKETS = (
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.5,
+    5.0,
+    10.0,
+    30.0,
+    60.0,
+    120.0,
+    300.0,
+    600.0,
+)
 
 
 class Metrics:
