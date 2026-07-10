@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
@@ -338,3 +338,135 @@ async def test_lifespan_skips_metrics_server_when_disabled(
         pass
 
     assert started == []
+
+
+# --- OpenAPI documentation ------------------------------------------------
+#
+# The generated schema is the machine-readable contract a caller (human or
+# agent) reads from /docs and /openapi.json — these lock in the narrative,
+# the real version, the auth scheme, and honest error documentation.
+
+
+def test_openapi_info_carries_narrative_and_real_version() -> None:
+    """info block explains the service and reports the package version."""
+    import importlib.metadata
+
+    spec = create_app().openapi()
+    info = spec["info"]
+
+    assert info["title"] == "bscribe"
+    assert info["summary"]
+    # Not FastAPI's default "0.1.0" — the setuptools-scm package version.
+    assert info["version"] == importlib.metadata.version("bscribe")
+    # An agent must learn how to authenticate from the description alone.
+    assert "Authorization: Bearer" in info["description"]
+    assert "problem+json" in info["description"]
+
+
+def test_openapi_declares_bearer_auth_on_every_v1_route() -> None:
+    """Every /v1 op requires the bearer scheme; /healthz stays open."""
+    spec = create_app().openapi()
+
+    assert spec["components"]["securitySchemes"]["HTTPBearer"]["scheme"] == "bearer"
+    for path, methods in spec["paths"].items():
+        for method, op in methods.items():
+            secured = bool(op.get("security"))
+            if path.startswith("/v1"):
+                assert secured, f"{method} {path} missing security"
+            else:
+                assert not secured, f"{method} {path} unexpectedly secured"
+
+
+def test_openapi_documents_universal_errors_on_every_v1_route() -> None:
+    """401 and 500 (the catch-all) are documented on every /v1 operation."""
+    spec = create_app().openapi()
+
+    for path, methods in spec["paths"].items():
+        if not path.startswith("/v1"):
+            continue
+        for method, op in methods.items():
+            codes = set(op["responses"])
+            assert {"401", "500"} <= codes, f"{method} {path} missing 401/500"
+
+
+def test_openapi_documents_auth_and_error_responses() -> None:
+    """Convert documents its full problem+json failure ladder, including 401."""
+    spec = create_app().openapi()
+
+    convert = spec["paths"]["/v1/convert"]["post"]["responses"]
+    assert {"400", "401", "413", "415", "422", "500"} <= set(convert)
+    # Error bodies are advertised under the real RFC 9457 media type, not the
+    # application/json FastAPI defaults a model= response to.
+    problem_ref = "#/components/schemas/Problem"
+    error_body = convert["401"]["content"]
+    assert "application/json" not in error_body
+    assert error_body["application/problem+json"]["schema"]["$ref"] == problem_ref
+
+
+def test_openapi_prunes_default_validation_422() -> None:
+    """FastAPI's framework-default 422 is stripped; bscribe returns 400."""
+    spec = create_app().openapi()
+
+    # bscribe never returns HTTPValidationError — validation failures are 400.
+    schemas = spec["components"]["schemas"]
+    assert "HTTPValidationError" not in schemas
+    assert "ValidationError" not in schemas
+    # A param-only route keeps no 422 at all.
+    assert "422" not in spec["paths"]["/v1/jobs/{job_id}"]["get"]["responses"]
+    # The route that genuinely returns 422 (unparseable) keeps its own,
+    # bodied by Problem rather than the pruned framework schema.
+    assert "422" in spec["paths"]["/v1/convert"]["post"]["responses"]
+
+
+def test_openapi_post_processing_is_idempotent() -> None:
+    """A second prune/relabel pass over an already-processed schema is a no-op."""
+    import copy
+
+    from bscribe.app import (
+        _prune_default_validation_responses,  # pyright: ignore[reportPrivateUsage]
+        _relabel_problem_media_type,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    spec = create_app().openapi()  # already processed once during generation
+    before = copy.deepcopy(spec)
+
+    _prune_default_validation_responses(spec)
+    _relabel_problem_media_type(spec)
+
+    assert spec == before
+
+
+def test_prune_keeps_validation_schema_still_referenced() -> None:
+    """Pruning never orphans a schema a surviving response still points at."""
+    from bscribe.app import (
+        _prune_default_validation_responses,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    ref = {"$ref": "#/components/schemas/HTTPValidationError"}
+    # A 422 under a non-json media type is not the FastAPI default, so the
+    # prune loop leaves it in place — the schema it references must survive.
+    schema: dict[str, Any] = {
+        "paths": {
+            "/x": {
+                "get": {
+                    "responses": {"422": {"content": {"text/plain": {"schema": ref}}}}
+                }
+            }
+        },
+        "components": {"schemas": {"HTTPValidationError": {"type": "object"}}},
+    }
+
+    _prune_default_validation_responses(schema)
+
+    assert "422" in schema["paths"]["/x"]["get"]["responses"]
+    assert "HTTPValidationError" in schema["components"]["schemas"]
+
+
+def test_openapi_success_bodies_stay_application_json() -> None:
+    """Only Problem error bodies are relabelled; success bodies stay json."""
+    spec = create_app().openapi()
+
+    result = spec["paths"]["/v1/jobs/{job_id}/result"]["get"]["responses"]
+    assert "application/json" in result["200"]["content"]
+    assert "application/json" in result["202"]["content"]
+    assert "application/problem+json" in result["409"]["content"]

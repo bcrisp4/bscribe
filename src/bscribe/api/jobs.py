@@ -38,6 +38,7 @@ from fastapi import (
 )
 from fastapi.responses import Response
 
+from bscribe.api.responses import error_responses
 from bscribe.api.schemas import ConvertResponse, JobListResponse, JobResponse
 from bscribe.api.staging import stage_upload
 from bscribe.auth import require_token
@@ -62,7 +63,13 @@ def _job_not_found() -> HTTPException:
     return HTTPException(status_code=404, detail=_JOB_NOT_FOUND_DETAIL)
 
 
-@router.post("", response_model=JobResponse, status_code=201)
+@router.post(
+    "",
+    response_model=JobResponse,
+    status_code=201,
+    summary="Submit an async conversion job",
+    responses=error_responses(400, 413, 415),
+)
 async def submit_job(
     request: Request,
     token: Annotated[Token, Depends(require_token)],
@@ -70,7 +77,14 @@ async def submit_job(
     output: Annotated[OutputFormat, Form()] = OutputFormat.MARKDOWN,
     ocr: Annotated[OcrMode, Form()] = OcrMode.AUTO,
 ) -> JobResponse:
-    """Accept one uploaded document as an async job and return its id."""
+    """Accept one uploaded document as an async job and return its id.
+
+    Same parameters as `POST /v1/convert` (`file`, `output`, `ocr`) but
+    returns `201` immediately with the job object (id, status, submission
+    parameters, timestamps). The document is parsed on the shared worker
+    pool; poll `GET /v1/jobs/{id}/result` for the outcome. A supported
+    document that fails to parse becomes a `failed` job rather than a `422`.
+    """
     settings = request.app.state.settings
     pool = request.app.state.worker_pool
     store = request.app.state.job_store
@@ -102,25 +116,46 @@ async def submit_job(
     return JobResponse.from_job(job)
 
 
-@router.get("", response_model=JobListResponse)
+@router.get(
+    "",
+    response_model=JobListResponse,
+    summary="List the token's jobs",
+    responses=error_responses(400),
+)
 def list_jobs(
     request: Request,
     token: Annotated[Token, Depends(require_token)],
     status: Annotated[JobStatus | None, Query()] = None,
 ) -> JobListResponse:
-    """List the calling token's jobs, newest first; ``?status=`` filters."""
+    """List the calling token's jobs, newest first.
+
+    Optional `?status=` filters by lifecycle state (`queued`, `running`,
+    `done`, `failed`). Returns a `{"jobs": [...]}` wrapper (not a bare
+    array) so pagination can be added later without a new API version. Only
+    the caller's own jobs are ever listed.
+    """
     store = request.app.state.job_store
     jobs = store.list_for_token(token.id, status=status)
     return JobListResponse(jobs=[JobResponse.from_job(job) for job in jobs])
 
 
-@router.get("/{job_id}", response_model=JobResponse)
+@router.get(
+    "/{job_id}",
+    response_model=JobResponse,
+    summary="Get one job's status",
+    responses=error_responses(404),
+)
 def get_job(
     request: Request,
     token: Annotated[Token, Depends(require_token)],
     job_id: str,
 ) -> JobResponse:
-    """Return one job's status/metadata."""
+    """Return one job's status and metadata.
+
+    `failure_detail` carries a fixed reason string on `failed` jobs. A
+    job owned by another token is `404`, indistinguishable from an unknown
+    id.
+    """
     store = request.app.state.job_store
     job = store.get(job_id, token.id)
     if job is None:
@@ -128,13 +163,21 @@ def get_job(
     return JobResponse.from_job(job)
 
 
-@router.delete("/{job_id}", status_code=204)
+@router.delete(
+    "/{job_id}",
+    status_code=204,
+    summary="Cancel and purge a job",
+    responses=error_responses(404),
+)
 async def delete_job(
     request: Request,
     token: Annotated[Token, Depends(require_token)],
     job_id: str,
 ) -> Response:
     """Cancel and purge a job in any state (docs/design.md — Endpoints).
+
+    Returns `204` on success. For a `running` job the worker process is
+    killed — real cancellation. An unknown or other-token id is `404`.
 
     The row (and any stored result) is purged before the response; the
     in-flight task, if any, is cancelled fire-and-forget — ``WorkerPool.parse``
@@ -156,13 +199,39 @@ async def delete_job(
     return Response(status_code=204)
 
 
-@router.get("/{job_id}/result", response_model=None)
+@router.get(
+    "/{job_id}/result",
+    response_model=None,
+    summary="Fetch a job's result",
+    responses={
+        200: {
+            "model": ConvertResponse,
+            "description": "Job is `done`; the converted document, same shape "
+            "as `POST /v1/convert`.",
+        },
+        202: {
+            "model": JobResponse,
+            "description": "Job is still `queued`/`running`; body is the job "
+            "object carrying its current status. Poll again.",
+        },
+        **error_responses(404, 409),
+    },
+)
 def get_job_result(
     request: Request,
     token: Annotated[Token, Depends(require_token)],
     job_id: str,
 ) -> Response:
-    """Return a done job's result; 202 while pending, 409 when failed."""
+    """Fetch a job's converted result.
+
+    * `200` — job is `done`: the result document, identical in shape to a
+      `POST /v1/convert` response.
+    * `202` — job is `queued`/`running`: the job object with its current
+      status; poll again.
+    * `409` — job `failed`: no result; read the reason from
+      `GET /v1/jobs/{id}`.
+    * `404` — unknown or other-token id.
+    """
     store = request.app.state.job_store
     job = store.get(job_id, token.id)
     if job is None:

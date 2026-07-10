@@ -11,6 +11,16 @@ section is renamed to the new version and becomes the GitHub Release notes.
 
 ## [Unreleased]
 
+### Changed
+
+- The OpenAPI docs (`/docs`, `/openapi.json`) now describe the service well
+  enough to use without external context: a top-level description covering
+  what bscribe does and how to authenticate, the real package version (was
+  a placeholder `0.1.0`), documented `401` and problem+json error responses
+  on every endpoint, and richer per-operation summaries. The framework's
+  misleading default `422` validation response is removed — bscribe returns
+  `400` for malformed requests.
+
 ## [0.3.0] - 2026-07-09
 
 ### Added
