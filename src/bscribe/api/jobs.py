@@ -68,7 +68,7 @@ def _job_not_found() -> HTTPException:
     response_model=JobResponse,
     status_code=201,
     summary="Submit an async conversion job",
-    responses=error_responses(400, 413, 415, 500),
+    responses=error_responses(400, 413, 415),
 )
 async def submit_job(
     request: Request,

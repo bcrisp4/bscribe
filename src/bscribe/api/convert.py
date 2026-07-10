@@ -33,7 +33,7 @@ router = APIRouter(tags=["convert"])
     "/convert",
     response_model=ConvertResponse,
     summary="Convert a document synchronously",
-    responses=error_responses(400, 413, 415, 422, 500),
+    responses=error_responses(400, 413, 415, 422),
 )
 async def convert(
     request: Request,

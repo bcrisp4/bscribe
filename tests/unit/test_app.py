@@ -377,6 +377,18 @@ def test_openapi_declares_bearer_auth_on_every_v1_route() -> None:
                 assert not secured, f"{method} {path} unexpectedly secured"
 
 
+def test_openapi_documents_universal_errors_on_every_v1_route() -> None:
+    """401 and 500 (the catch-all) are documented on every /v1 operation."""
+    spec = create_app().openapi()
+
+    for path, methods in spec["paths"].items():
+        if not path.startswith("/v1"):
+            continue
+        for method, op in methods.items():
+            codes = set(op["responses"])
+            assert {"401", "500"} <= codes, f"{method} {path} missing 401/500"
+
+
 def test_openapi_documents_auth_and_error_responses() -> None:
     """Convert documents its full problem+json failure ladder, including 401."""
     spec = create_app().openapi()
