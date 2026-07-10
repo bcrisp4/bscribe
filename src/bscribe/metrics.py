@@ -119,6 +119,32 @@ class _StateCollector(Collector):
     before startup (or a lifespan-less test) simply reports zeroed counters.
     """
 
+    # (metric name, help, WorkerPoolMetrics field) for the health counters,
+    # iterated in collect() so a fifth counter (e.g. #12 recycles) is one row
+    # here, not a fifth near-identical yield.
+    _WORKER_METRICS = (
+        (
+            "bscribe_worker_timeout_kills",
+            "Parse workers killed for exceeding the per-job timeout.",
+            "timeout_kills",
+        ),
+        (
+            "bscribe_worker_crashes",
+            "Parse workers that died mid-parse (crash or broken pool).",
+            "crashes",
+        ),
+        (
+            "bscribe_worker_cancellations",
+            "Parse jobs cancelled (client cancel or shutdown).",
+            "cancellations",
+        ),
+        (
+            "bscribe_worker_pool_rebuilds",
+            "Times the worker pool was rebuilt after breaking.",
+            "pool_rebuilds",
+        ),
+    )
+
     def __init__(
         self,
         *,
@@ -128,31 +154,17 @@ class _StateCollector(Collector):
     ) -> None:
         self._job_store = job_store
         self._get_worker_pool = get_worker_pool
-        self._pipeline_info = pipeline_info
+        # Build info is constant — pipeline_info is a frozen stamp fixed at
+        # factory time — so build the family once rather than per scrape.
+        self._build_info = _build_info_family(pipeline_info)
 
     def collect(self) -> Iterable[Metric]:
         yield from self._job_metrics()
-        yield self._worker_metric(
-            "bscribe_worker_timeout_kills",
-            "Parse workers killed for exceeding the per-job timeout.",
-            "timeout_kills",
-        )
-        yield self._worker_metric(
-            "bscribe_worker_crashes",
-            "Parse workers that died mid-parse (crash or broken pool).",
-            "crashes",
-        )
-        yield self._worker_metric(
-            "bscribe_worker_cancellations",
-            "Parse jobs cancelled (client cancel or shutdown).",
-            "cancellations",
-        )
-        yield self._worker_metric(
-            "bscribe_worker_pool_rebuilds",
-            "Times the worker pool was rebuilt after breaking.",
-            "pool_rebuilds",
-        )
-        yield self._build_info()
+        pool = self._get_worker_pool()
+        for name, doc, field in self._WORKER_METRICS:
+            value = getattr(pool.metrics, field) if pool is not None else 0
+            yield CounterMetricFamily(name, doc, value=value)
+        yield self._build_info
 
     def _job_metrics(self) -> Iterable[Metric]:
         counts = self._job_store.count_by_status()
@@ -170,23 +182,18 @@ class _StateCollector(Collector):
             value=counts.get(JobStatus.QUEUED, 0),
         )
 
-    def _worker_metric(self, name: str, doc: str, field: str) -> CounterMetricFamily:
-        pool = self._get_worker_pool()
-        value = getattr(pool.metrics, field) if pool is not None else 0
-        return CounterMetricFamily(name, doc, value=value)
 
-    def _build_info(self) -> GaugeMetricFamily:
-        components = self._pipeline_info.components
-        keys = sorted(components)
-        family = GaugeMetricFamily(
-            "bscribe_build_info",
-            "Pipeline identity: fingerprint and component versions (always 1).",
-            labels=["fingerprint", *keys],
-        )
-        family.add_metric(
-            [self._pipeline_info.fingerprint, *(components[k] for k in keys)], 1.0
-        )
-        return family
+def _build_info_family(pipeline_info: PipelineStamp) -> GaugeMetricFamily:
+    """Build the static ``bscribe_build_info`` gauge (fingerprint + versions)."""
+    components = pipeline_info.components
+    keys = sorted(components)
+    family = GaugeMetricFamily(
+        "bscribe_build_info",
+        "Pipeline identity: fingerprint and component versions (always 1).",
+        labels=["fingerprint", *keys],
+    )
+    family.add_metric([pipeline_info.fingerprint, *(components[k] for k in keys)], 1.0)
+    return family
 
 
 def build_metrics(

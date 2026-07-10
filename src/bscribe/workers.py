@@ -26,6 +26,13 @@ path re-checks ``_closed`` so a close during rebuild cannot resurrect a
 pool. The synchronous ``close()`` is for non-async callers (tests);
 async code must use ``aclose()``. If any of this moves off the loop
 thread, revisit.
+
+One reader does live off the loop thread: the Prometheus metrics server
+(``bscribe.metrics``) reads ``metrics`` from its WSGI daemon thread on each
+scrape. That stays lock-free only because the counters are plain ``int``s
+mutated monotonically — a stale read merely under-counts by in-flight
+increments. Changing ``metrics`` to a non-atomic type (or running free-
+threaded) would break that assumption and need a lock.
 """
 
 from __future__ import annotations

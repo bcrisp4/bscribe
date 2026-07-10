@@ -274,11 +274,14 @@ async def test_lifespan_starts_and_stops_metrics_server(
     """When enabled, the lifespan starts the exposition server on the
     configured port/addr/registry and shuts it down on teardown."""
     calls: dict[str, object] = {}
-    shutdowns: list[None] = []
+    events: list[str] = []
 
     class _FakeServer:
         def shutdown(self) -> None:
-            shutdowns.append(None)
+            events.append("shutdown")
+
+        def server_close(self) -> None:
+            events.append("server_close")
 
     def _fake_start(port: int, *, addr: str, registry: object) -> tuple[object, None]:
         calls["port"] = port
@@ -292,9 +295,10 @@ async def test_lifespan_starts_and_stops_metrics_server(
     async with app.router.lifespan_context(app):
         assert calls["port"] == 9271
         assert calls["registry"] is app.state.metrics_registry
-        assert shutdowns == []
+        assert events == []
 
-    assert shutdowns == [None]
+    # Loop stopped, then the listening socket released — in that order.
+    assert events == ["shutdown", "server_close"]
 
 
 async def test_lifespan_metrics_bind_failure_still_tears_down(

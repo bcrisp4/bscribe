@@ -319,7 +319,7 @@ bscribe joins the existing Prometheus/Grafana stack. Metrics are served on a **s
 - HTTP request count + duration histograms, labelled by `handler` (route template), `method` and `status` — via `prometheus-fastapi-instrumentator`, which resolves the route template so per-id paths don't explode label cardinality
 - Jobs by state (gauge), job duration histogram (a split by OCR use returns with the deferred `ocr_used` signal — see Closed issues), queue depth
 - Worker pool health: counters for timeout kills, worker crashes, cancellations, pool rebuilds (worker **recycles** need a pebble hook that doesn't exist — deferred, issue #12)
-- A build/pipeline info metric carrying `pipeline_fingerprint` and component versions — a Grafana panel shows at a glance which pipeline version is live
+- A build/pipeline info metric (`bscribe_build_info`) carrying the pipeline fingerprint (label `fingerprint`) and component versions — a Grafana panel shows at a glance which pipeline version is live
 - Process and Python-runtime metrics for the parent process (CPU, memory, fds, GC) from prometheus-client's stdlib collectors — Linux-only at runtime; per-worker (child-process) metrics are deferred to a follow-up
 
 Instrumentation via `prometheus-client` + `prometheus-fastapi-instrumentator`. Alerting stays in the existing stack: `up == 0` on the scrape target is the only alert worth having, per the availability SLO.

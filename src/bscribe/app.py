@@ -120,7 +120,13 @@ def create_app(
             yield
         finally:
             if metrics_server is not None:
-                metrics_server.shutdown()
+                # shutdown() stops the serve_forever loop but blocks on its
+                # poll interval, so offload it like the pool teardown below;
+                # server_close() then releases the listening socket (shutdown
+                # alone leaks the bound port until process exit — a failed
+                # rebind on any in-process restart).
+                await asyncio.to_thread(metrics_server.shutdown)
+                metrics_server.server_close()
             # Purge task first: cancellation stops any further iterations.
             # An iteration already inside to_thread cannot be interrupted
             # and may finish in the background — harmless: it only issues
