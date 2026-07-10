@@ -2,9 +2,24 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from bscribe.api.responses import Problem, error_responses
+from bscribe.errors import problem_response
+
+
+def test_problem_model_tracks_runtime_problem_response_body() -> None:
+    """The documented Problem schema stays in step with the wire body.
+
+    ``Problem`` (docs) and ``errors.problem_response`` (runtime) define the
+    problem+json shape independently; this couples them so adding or renaming
+    a member on one side without the other fails loudly.
+    """
+    body = json.loads(bytes(problem_response(status=401, detail="x").body))
+
+    assert set(body) == set(Problem.model_fields)
 
 
 def test_problem_model_matches_rfc9457_shape() -> None:

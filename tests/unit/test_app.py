@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
@@ -422,6 +422,32 @@ def test_openapi_post_processing_is_idempotent() -> None:
     _relabel_problem_media_type(spec)
 
     assert spec == before
+
+
+def test_prune_keeps_validation_schema_still_referenced() -> None:
+    """Pruning never orphans a schema a surviving response still points at."""
+    from bscribe.app import (
+        _prune_default_validation_responses,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    ref = {"$ref": "#/components/schemas/HTTPValidationError"}
+    # A 422 under a non-json media type is not the FastAPI default, so the
+    # prune loop leaves it in place — the schema it references must survive.
+    schema: dict[str, Any] = {
+        "paths": {
+            "/x": {
+                "get": {
+                    "responses": {"422": {"content": {"text/plain": {"schema": ref}}}}
+                }
+            }
+        },
+        "components": {"schemas": {"HTTPValidationError": {"type": "object"}}},
+    }
+
+    _prune_default_validation_responses(schema)
+
+    assert "422" in schema["paths"]["/x"]["get"]["responses"]
+    assert "HTTPValidationError" in schema["components"]["schemas"]
 
 
 def test_openapi_success_bodies_stay_application_json() -> None:

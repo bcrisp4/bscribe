@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.metadata
+import json
 import time
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, cast
@@ -107,6 +108,23 @@ def _as_dict(value: Any) -> dict[str, Any]:
     return cast("dict[str, Any]", value) if isinstance(value, dict) else {}
 
 
+def _schema_is_referenced(schema: dict[str, Any], name: str) -> bool:
+    """Report whether ``#/components/schemas/{name}`` is still used.
+
+    Checks the operations (via ``paths``) and every *other* component schema,
+    excluding the named schema's own definition (which would otherwise count
+    a self- or sibling-reference as usage). Used to gate schema deletion so a
+    surviving ``$ref`` is never orphaned.
+    """
+    ref = f"#/components/schemas/{name}"
+    if ref in json.dumps(schema.get("paths", {})):
+        return True
+    schemas = _as_dict(_as_dict(schema.get("components")).get("schemas"))
+    return any(
+        ref in json.dumps(defn) for other, defn in schemas.items() if other != name
+    )
+
+
 def _prune_default_validation_responses(schema: dict[str, Any]) -> None:
     """Drop FastAPI's auto-injected ``422`` validation responses.
 
@@ -134,9 +152,15 @@ def _prune_default_validation_responses(schema: dict[str, Any]) -> None:
             )
             if _as_dict(body).get("$ref") == validation_ref:
                 responses.pop("422", None)
+    # Drop the now-orphaned validation schemas, but only once nothing still
+    # points at them: deleting a schema that some surviving response (or
+    # another schema) references would leave a dangling $ref. HTTPValidationError
+    # is checked before ValidationError so that, when the former goes, the
+    # latter's sole referencer is already gone and it too can be removed.
     schemas = _as_dict(_as_dict(schema.get("components")).get("schemas"))
     for name in ("HTTPValidationError", "ValidationError"):
-        schemas.pop(name, None)
+        if not _schema_is_referenced(schema, name):
+            schemas.pop(name, None)
 
 
 def _relabel_problem_media_type(schema: dict[str, Any]) -> None:
