@@ -909,7 +909,7 @@ class TestPipelineStampPersistence:
             columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
             assert "result_pipeline" in columns
             (version,) = conn.execute("PRAGMA user_version").fetchone()
-            assert version == 4
+            assert version == 5
 
         found = store.get_result("abcd1234abcd1234", "a1b2c3d4")
         assert found is not None

@@ -7,17 +7,22 @@ no exposition server is started — that is the app lifespan's job, exercised in
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 from prometheus_client import CollectorRegistry, generate_latest
 
 from bscribe.domain.jobs import create_job
-from bscribe.domain.models import OcrMode, OutputFormat, PipelineStamp
+from bscribe.domain.models import Component, OcrMode, OutputFormat, PipelineStamp
 from bscribe.metrics import NoopMetrics, build_metrics
 from tests.unit.fakes import CANNED_PIPELINE_STAMP, FakeJobStore, GatedPool
 
 if TYPE_CHECKING:
     from bscribe.domain.models import Job
+
+# Prometheus label-name grammar (data model): a leading letter/underscore
+# then letters/digits/underscores.
+_LABEL_NAME = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")
 
 
 def _queued(token_id: str = "a1b2c3d4") -> Job:
@@ -137,3 +142,14 @@ class TestStdlibCollectors:
 class TestNoopMetrics:
     def test_observe_job_is_a_noop(self) -> None:
         NoopMetrics().observe_job(9.9)  # must not raise or register anything
+
+
+class TestBuildInfoLabelSafety:
+    def test_every_component_key_is_a_valid_prometheus_label_name(self) -> None:
+        """build_info uses component keys as label *names* (metrics.py
+        _build_info_family). An invalid name raises inside collect() and, since
+        generate_latest iterates all collectors, takes down the whole /metrics
+        response — so a component keyed e.g. 'image-magick' must fail here, at
+        CI, not in production."""
+        for component in Component:
+            assert _LABEL_NAME.fullmatch(component.value), component.value
