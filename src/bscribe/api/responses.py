@@ -52,9 +52,10 @@ class Problem(BaseModel):
 def error_responses(*statuses: int) -> dict[int | str, dict[str, Any]]:
     """Build a FastAPI ``responses`` mapping for the given error codes.
 
-    Each entry documents a :class:`Problem` body. The live media type is
-    ``application/problem+json``; that is stated in every description since
-    FastAPI files the schema under ``application/json``.
+    Each entry documents a :class:`Problem` body. FastAPI files a ``model=``
+    response under ``application/json``; ``bscribe.app._relabel_problem_media_type``
+    rewrites these to the real ``application/problem+json`` media type when
+    the schema is generated.
 
     Args:
         statuses: The HTTP status codes this operation can return.
@@ -63,11 +64,6 @@ def error_responses(*statuses: int) -> dict[int | str, dict[str, Any]]:
         A mapping suitable for a route's ``responses=`` argument.
     """
     return {
-        status: {
-            "model": Problem,
-            "description": (
-                f"{_STATUS_DESCRIPTIONS[status]} Body is `application/problem+json`."
-            ),
-        }
+        status: {"model": Problem, "description": _STATUS_DESCRIPTIONS[status]}
         for status in statuses
     }

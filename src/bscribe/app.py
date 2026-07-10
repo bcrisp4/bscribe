@@ -139,18 +139,44 @@ def _prune_default_validation_responses(schema: dict[str, Any]) -> None:
         schemas.pop(name, None)
 
 
+def _relabel_problem_media_type(schema: dict[str, Any]) -> None:
+    """Advertise Problem error bodies as ``application/problem+json``.
+
+    FastAPI files a ``model=``-documented response under ``application/json``,
+    but the runtime error handler emits RFC 9457 ``application/problem+json``
+    (:data:`bscribe.errors.PROBLEM_JSON_MEDIA_TYPE`). Move each ``Problem``-
+    bodied response to the correct media type so a generated client infers
+    the right ``Content-Type``. Success bodies (``200``/``202``, plain
+    ``application/json``) reference other schemas and are left untouched.
+
+    Idempotent: once moved, the ``application/json`` key is gone, so a second
+    pass matches nothing.
+    """
+    problem_ref = "#/components/schemas/Problem"
+    for methods in _as_dict(schema.get("paths")).values():
+        for operation in _as_dict(methods).values():
+            for response in _as_dict(_as_dict(operation).get("responses")).values():
+                content = _as_dict(_as_dict(response).get("content"))
+                json_body = _as_dict(content.get("application/json"))
+                if _as_dict(json_body.get("schema")).get("$ref") == problem_ref:
+                    content["application/problem+json"] = content.pop(
+                        "application/json"
+                    )
+
+
 def _install_openapi(app: FastAPI) -> None:
     """Wrap ``app.openapi`` to post-process the generated schema.
 
     FastAPI builds and caches the schema on first access; we call the
-    original, prune the misleading default validation responses in place
-    (the cached dict), and return it.
+    original, prune the misleading default validation responses and correct
+    the error media type in place (the cached dict), and return it.
     """
     original = app.openapi
 
     def openapi() -> dict[str, Any]:
         schema = original()
         _prune_default_validation_responses(schema)
+        _relabel_problem_media_type(schema)
         return schema
 
     # Reassigning app.openapi is FastAPI's documented customization hook;

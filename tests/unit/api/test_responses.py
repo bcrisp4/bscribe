@@ -23,7 +23,7 @@ def test_error_responses_bodies_each_code_with_problem() -> None:
     assert set(responses) == {401, 404}
     for entry in responses.values():
         assert entry["model"] is Problem
-        assert "application/problem+json" in entry["description"]
+        assert entry["description"]
 
 
 def test_error_responses_descriptions_are_status_specific() -> None:

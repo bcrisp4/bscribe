@@ -378,15 +378,17 @@ def test_openapi_declares_bearer_auth_on_every_v1_route() -> None:
 
 
 def test_openapi_documents_auth_and_error_responses() -> None:
-    """Convert documents its full problem+json failure ladder, incl. 401."""
+    """Convert documents its full problem+json failure ladder, including 401."""
     spec = create_app().openapi()
 
     convert = spec["paths"]["/v1/convert"]["post"]["responses"]
     assert {"400", "401", "413", "415", "422", "500"} <= set(convert)
+    # Error bodies are advertised under the real RFC 9457 media type, not the
+    # application/json FastAPI defaults a model= response to.
     problem_ref = "#/components/schemas/Problem"
-    assert (
-        convert["401"]["content"]["application/json"]["schema"]["$ref"] == problem_ref
-    )
+    error_body = convert["401"]["content"]
+    assert "application/json" not in error_body
+    assert error_body["application/problem+json"]["schema"]["$ref"] == problem_ref
 
 
 def test_openapi_prunes_default_validation_422() -> None:
@@ -404,12 +406,29 @@ def test_openapi_prunes_default_validation_422() -> None:
     assert "422" in spec["paths"]["/v1/convert"]["post"]["responses"]
 
 
-def test_openapi_generation_is_idempotent() -> None:
-    """Re-running the post-processor over the cached schema is a no-op."""
-    app = create_app()
+def test_openapi_post_processing_is_idempotent() -> None:
+    """A second prune/relabel pass over an already-processed schema is a no-op."""
+    import copy
 
-    first = app.openapi()
-    second = app.openapi()
+    from bscribe.app import (
+        _prune_default_validation_responses,  # pyright: ignore[reportPrivateUsage]
+        _relabel_problem_media_type,  # pyright: ignore[reportPrivateUsage]
+    )
 
-    assert first == second
-    assert "HTTPValidationError" not in second["components"]["schemas"]
+    spec = create_app().openapi()  # already processed once during generation
+    before = copy.deepcopy(spec)
+
+    _prune_default_validation_responses(spec)
+    _relabel_problem_media_type(spec)
+
+    assert spec == before
+
+
+def test_openapi_success_bodies_stay_application_json() -> None:
+    """Only Problem error bodies are relabelled; success bodies stay json."""
+    spec = create_app().openapi()
+
+    result = spec["paths"]["/v1/jobs/{job_id}/result"]["get"]["responses"]
+    assert "application/json" in result["200"]["content"]
+    assert "application/json" in result["202"]["content"]
+    assert "application/problem+json" in result["409"]["content"]
