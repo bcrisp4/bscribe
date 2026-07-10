@@ -102,7 +102,10 @@ VOLUME /data
 
 ENV PATH="/app/.venv/bin:${PATH}"
 USER bscribe
-EXPOSE 8000
+# 8000 = API; 9090 = Prometheus metrics (separate server, BSCRIBE_METRICS_PORT;
+# BSCRIBE_METRICS_ENABLED=false turns it off). Both bind all interfaces in here
+# — access is gated by the tailnet, not the bind (see docs/deployment.md).
+EXPOSE 8000 9090
 
 # Exec-form CMD keeps the probe shell-free. Note: `podman build` defaults to
 # OCI image format, which silently drops HEALTHCHECK — build with

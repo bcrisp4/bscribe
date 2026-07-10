@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from bscribe.domain.models import Job, JobStatus, ParsedDocument, PipelineStamp
+from bscribe.workers import WorkerPoolMetrics
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -125,6 +126,12 @@ class FakeJobStore:
         self.results.pop(job_id, None)
         return True
 
+    def count_by_status(self) -> dict[JobStatus, int]:
+        counts: dict[JobStatus, int] = {}
+        for job in self.jobs.values():
+            counts[job.status] = counts.get(job.status, 0) + 1
+        return counts
+
     def sweep_incomplete(self, detail: str) -> int:
         incomplete = [
             job
@@ -155,7 +162,10 @@ class GatedPool:
     """Stands in for WorkerPool — the runner's/endpoints' parse seam.
 
     ``started``/``release`` make the queued → running → terminal lifecycle
-    observable deterministically; ``exc`` drives the failure paths.
+    observable deterministically; ``exc`` drives the failure paths. Carries a
+    ``metrics`` field so the metrics collector — which reads
+    ``worker_pool.metrics`` — has something to read when this fake stands in
+    for the real pool (the real one owns a ``WorkerPoolMetrics``).
     """
 
     def __init__(
@@ -174,6 +184,7 @@ class GatedPool:
         self.started = asyncio.Event()
         self.release = asyncio.Event()
         self.calls: list[Path] = []
+        self.metrics = WorkerPoolMetrics()
 
     async def parse(
         self, path: Path, *, output: OutputFormat, ocr: OcrMode

@@ -641,6 +641,27 @@ class SqliteJobStore:
             )
             return cursor.rowcount > 0
 
+    def count_by_status(self) -> dict[JobStatus, int]:
+        """Count all jobs grouped by status, across every token.
+
+        Returns:
+            A mapping from :class:`JobStatus` to its count; states with no
+            jobs are omitted (callers zero-fill). An unrecognized stored
+            status (there should be none — the column is CHECK-constrained)
+            is skipped rather than raising, keeping a scrape robust.
+        """
+        with _connect(self._db_path) as conn:
+            rows = conn.execute(
+                "SELECT status, COUNT(*) FROM jobs GROUP BY status"
+            ).fetchall()
+        counts: dict[JobStatus, int] = {}
+        for status, count in rows:
+            try:
+                counts[JobStatus(status)] = count
+            except ValueError:
+                continue
+        return counts
+
     def sweep_incomplete(self, detail: str) -> int:
         """Mark every queued/running job failed with ``detail``.
 

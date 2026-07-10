@@ -81,8 +81,11 @@ bscribe serves plain HTTP and is meant to sit behind Tailscale or a reverse prox
 that terminates TLS; it is never exposed directly to the public internet (see
 design.md — Security). Bind it to the tailnet interface or keep `-p` on a trusted
 network. `/healthz` is unauthenticated, for liveness probing inside that
-boundary. An unauthenticated `/metrics` endpoint for Prometheus scraping arrives
-in M3 (see design.md — Monitoring & alerting); it is not exposed yet.
+boundary. An unauthenticated `/metrics` endpoint for Prometheus scraping is
+served on a **separate port** (`BSCRIBE_METRICS_PORT`, default `9090`), not the
+API port — keep it reachable only by the Prometheus scraper on the tailnet, and
+`EXPOSE`/publish it alongside the API port when containerised. Disable it
+entirely with `BSCRIBE_METRICS_ENABLED=false`.
 
 ## Configuration
 
@@ -90,3 +93,8 @@ All configuration is `BSCRIBE_`-prefixed environment variables (see
 `src/bscribe/settings.py`). The image sets `BSCRIBE_DB_PATH=/data/bscribe.db` and
 `BSCRIBE_HOST=0.0.0.0`; change the listen port with `BSCRIBE_PORT` (not
 `serve --port`) so the `HEALTHCHECK` probe follows it.
+
+Metrics settings: `BSCRIBE_METRICS_ENABLED` (default `true`),
+`BSCRIBE_METRICS_PORT` (default `9090`), `BSCRIBE_METRICS_ADDR` (default
+`0.0.0.0` — access is gated by the tailnet, not the bind). The metrics server is
+a separate listener from the API; publish its port for Prometheus to scrape.

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from datetime import datetime
     from pathlib import Path
 
@@ -209,6 +210,20 @@ class JobStorePort(Protocol):
         Returns:
             ``True`` if a job was deleted; ``False`` for an unknown id or
             another token's job (indistinguishable by design).
+        """
+        ...
+
+    def count_by_status(self) -> Mapping[JobStatus, int]:
+        """Count all jobs grouped by status, across every token.
+
+        Cross-token and unscoped like ``sweep_incomplete``/
+        ``purge_older_than``: this feeds the operational metrics (jobs-by-
+        state gauge, queue depth — docs/design.md, Monitoring), not a caller
+        operation, so it never scopes to a token.
+
+        Returns:
+            A mapping from :class:`JobStatus` to its current count. States
+            with no jobs may be omitted; callers zero-fill.
         """
         ...
 

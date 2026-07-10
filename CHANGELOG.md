@@ -13,6 +13,13 @@ section is renamed to the new version and becomes the GitHub Release notes.
 
 ### Added
 
+- Prometheus metrics, served on a separate HTTP port (`BSCRIBE_METRICS_PORT`,
+  default `9090`; disable with `BSCRIBE_METRICS_ENABLED=false`, bind with
+  `BSCRIBE_METRICS_ADDR`). Exposes HTTP request rate/latency, jobs by state,
+  queue depth, job parse duration, worker-pool health counters (timeout kills,
+  crashes, cancellations, pool rebuilds), a build-info metric carrying the
+  pipeline fingerprint and component versions, and parent-process CPU/memory/GC
+  metrics. Point Prometheus at the metrics port to scrape.
 - `GET /v1/info` reports the current pipeline fingerprint and the version of
   every pipeline component, so you can check whether the conversion pipeline
   has changed without submitting a document. Requires a bearer token.

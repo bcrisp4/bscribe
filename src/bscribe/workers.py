@@ -135,12 +135,20 @@ class WorkerPool:
         worker_max_tasks: int,
         pipeline_info: PipelineStamp,
         parser_factory: Callable[[], ParserPort] = LiteparseParser,
+        job_observer: Callable[[float], None] = lambda _: None,
     ) -> None:
         self._worker_count = worker_count
         self._job_timeout_seconds = job_timeout_seconds
         self._worker_max_tasks = worker_max_tasks
         self._pipeline_info = pipeline_info
         self._parser_factory = parser_factory
+        # Called with each successful parse's wall-clock seconds — the single
+        # chokepoint both the sync (/v1/convert) and async (job runner) paths
+        # share, so job-duration metrics land in one place without coupling
+        # this adapter to prometheus (it just calls a plain callback). Default
+        # no-op keeps directly-constructed pools (tests, metrics disabled) free
+        # of a metrics dependency.
+        self._job_observer = job_observer
         self._closed = False
         self.metrics = WorkerPoolMetrics()
         self._pool = self._create_pool()
@@ -239,6 +247,10 @@ class WorkerPool:
             self.metrics.crashes += 1
             logger.error("worker_pool_broken", error_type=type(exc).__name__)
             raise WorkerCrashedError("worker pool broken") from exc
+        # Duration is the worker's own parse wall-clock (set in the worker,
+        # see _parse_in_worker), independent of scheduling/queue wait — the
+        # honest per-document parse cost for the job-duration histogram.
+        self._job_observer(result.duration_ms / 1000)
         return dataclasses.replace(
             result,
             pipeline=traversed_stamp(

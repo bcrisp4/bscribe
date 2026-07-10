@@ -480,6 +480,32 @@ class TestSqliteJobStore:
         store = SqliteJobStore(tmp_path / "jobs.db")
         assert store.list_for_token("a1b2c3d4") == []
 
+    def test_count_by_status_groups_across_tokens(self, tmp_path: Path) -> None:
+        """Counts cover every token and every state — it feeds the metrics."""
+        store = SqliteJobStore(tmp_path / "jobs.db")
+        queued_a = make_job(id="000000000000000a", token_id="a1b2c3d4")
+        queued_b = make_job(id="000000000000000b", token_id="0therT0k")
+        running = make_job(id="000000000000000c")
+        done = make_job(id="000000000000000d")
+        store.add(queued_a)
+        store.add(queued_b)
+        store.add(running)
+        store.add(done)
+        store.mark_running(running.id)
+        store.mark_running(done.id)
+        store.mark_done(done.id, make_result())
+
+        assert store.count_by_status() == {
+            JobStatus.QUEUED: 2,
+            JobStatus.RUNNING: 1,
+            JobStatus.DONE: 1,
+        }
+
+    def test_count_by_status_empty_store_returns_empty(self, tmp_path: Path) -> None:
+        """No jobs → no keys (callers zero-fill), not a row of zeros."""
+        store = SqliteJobStore(tmp_path / "jobs.db")
+        assert store.count_by_status() == {}
+
     def test_delete_own_job_returns_true_and_purges(self, tmp_path: Path) -> None:
         store = SqliteJobStore(tmp_path / "jobs.db")
         job = make_job()

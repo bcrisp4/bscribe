@@ -40,6 +40,11 @@ def _isolate_bscribe_env(  # pyright: ignore[reportUnusedFunction]
             monkeypatch.delenv(name)
     monkeypatch.setenv("BSCRIBE_DB_PATH", str(tmp_path / "bscribe.db"))
     monkeypatch.setenv("BSCRIBE_SCRATCH_DIR", str(tmp_path / "scratch"))
+    # Metrics off by default: bare create_app() lifespan tests would otherwise
+    # bind the real metrics port, racing xdist workers on the same socket.
+    # Metrics tests build the registry at factory time (no server needed) or
+    # opt in explicitly via a constructor kwarg (which overrides this env).
+    monkeypatch.setenv("BSCRIBE_METRICS_ENABLED", "false")
 
 
 # pyright strict flags fixtures as unused (reportUnusedFunction);

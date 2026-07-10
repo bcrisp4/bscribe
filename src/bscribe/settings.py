@@ -47,6 +47,14 @@ class Settings(BaseSettings):
         purge_interval_seconds: How often the periodic purge task runs to
             delete expired jobs.
         log_level: Minimum level emitted by the structlog pipeline.
+        metrics_enabled: Whether to expose Prometheus metrics. When true the
+            server binds a separate HTTP port (below); when false no registry,
+            instrumentation, or metrics server exists (docs/design.md —
+            Monitoring).
+        metrics_port: Port for the Prometheus exposition server — a separate
+            listener from the API, scraped tailnet-internally.
+        metrics_addr: Bind address for the metrics server. Defaults to all
+            interfaces: access is gated by the tailnet, not this bind.
     """
 
     model_config = SettingsConfigDict(env_prefix="BSCRIBE_", frozen=True)
@@ -60,3 +68,6 @@ class Settings(BaseSettings):
     result_ttl_seconds: int = Field(default=7 * 24 * 3600, gt=0)
     purge_interval_seconds: int = Field(default=3600, gt=0)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    metrics_enabled: bool = True
+    metrics_port: int = Field(default=9090, ge=1, le=65535)
+    metrics_addr: str = "0.0.0.0"  # noqa: S104 - tailnet-gated, see docstring
