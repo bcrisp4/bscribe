@@ -135,8 +135,10 @@ class TestConvertSuccess:
         }
 
     async def test_unstamped_result_yields_null_pipeline(self, tmp_path: Path) -> None:
-        # A pre-M3.1 stored async result round-trips as pipeline=None; the
-        # wire carries an explicit null rather than dropping the field.
+        # A result whose pipeline stamp is None serializes an explicit null
+        # rather than dropping the field. Sync parses always stamp, so None
+        # only arises for a pre-M3.1 stored async result; the sync path is
+        # used here purely to exercise the shared from_result mapping.
         pool = FakePool(result=ParsedDocument(content="x", pages=1, duration_ms=1.0))
         app = make_app(tmp_path, pool=pool)[0]
         secret = issue_token(app)
