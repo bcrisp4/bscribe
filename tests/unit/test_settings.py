@@ -53,6 +53,20 @@ class TestDefaults:
     def test_log_level_defaults_to_info(self) -> None:
         assert Settings().log_level == "INFO"
 
+    def test_metrics_enabled_defaults_true(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The shared conftest forces metrics off (bare-lifespan tests must not
+        # bind the port); clear it to see the shipped default.
+        monkeypatch.delenv("BSCRIBE_METRICS_ENABLED")
+        assert Settings().metrics_enabled is True
+
+    def test_metrics_port_defaults_to_9090(self) -> None:
+        assert Settings().metrics_port == 9090
+
+    def test_metrics_addr_defaults_to_all_interfaces(self) -> None:
+        assert Settings().metrics_addr == "0.0.0.0"  # noqa: S104 - asserting the default
+
 
 class TestEnvOverrides:
     """Every field is overridable via a BSCRIBE_-prefixed env var."""
@@ -76,6 +90,18 @@ class TestEnvOverrides:
     def test_purge_interval_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("BSCRIBE_PURGE_INTERVAL_SECONDS", "60")
         assert Settings().purge_interval_seconds == 60
+
+    def test_metrics_enabled_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("BSCRIBE_METRICS_ENABLED", "true")
+        assert Settings().metrics_enabled is True
+
+    def test_metrics_port_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("BSCRIBE_METRICS_PORT", "9210")
+        assert Settings().metrics_port == 9210
+
+    def test_metrics_addr_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("BSCRIBE_METRICS_ADDR", "127.0.0.1")
+        assert Settings().metrics_addr == "127.0.0.1"
 
 
 class TestValidation:
@@ -129,6 +155,18 @@ class TestValidation:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("BSCRIBE_PURGE_INTERVAL_SECONDS", "-1")
+        with pytest.raises(ValidationError):
+            Settings()
+
+    def test_zero_metrics_port_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("BSCRIBE_METRICS_PORT", "0")
+        with pytest.raises(ValidationError):
+            Settings()
+
+    def test_out_of_range_metrics_port_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BSCRIBE_METRICS_PORT", "65536")
         with pytest.raises(ValidationError):
             Settings()
 

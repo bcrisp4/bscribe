@@ -228,3 +228,113 @@ async def test_lifespan_purge_task_runs_until_shutdown() -> None:
         assert not task.done()
 
     assert task.done()
+
+
+async def test_metrics_disabled_yields_noop_and_no_registry() -> None:
+    """The shared conftest disables metrics: no registry, no instrumentation."""
+    app = create_app(Settings())
+
+    assert type(app.state.metrics).__name__ == "NoopMetrics"
+    assert not hasattr(app.state, "metrics_registry")
+
+
+async def test_metrics_enabled_builds_registry_with_bscribe_metrics() -> None:
+    app = create_app(Settings(metrics_enabled=True))
+
+    output = app.state.metrics_registry.get_sample_value(
+        "bscribe_build_info",
+        {
+            "fingerprint": CANNED_PIPELINE_STAMP.fingerprint,
+            "bscribe": "0.0.0-test",
+            "liteparse": "0.0.0-test",
+        },
+    )
+    assert output == 1.0
+
+
+async def test_http_metrics_use_route_template_handler() -> None:
+    """The handler label is the route template, so per-id paths collapse to
+    one series instead of exploding cardinality."""
+    app = create_app(Settings(metrics_enabled=True))
+    async with make_client(app) as client:
+        await client.get("/v1/jobs/first-unknown-id")
+        await client.get("/v1/jobs/second-unknown-id")
+
+    # Both requests (401, no token) land on one templated series.
+    value = app.state.metrics_registry.get_sample_value(
+        "http_requests_total",
+        {"handler": "/v1/jobs/{job_id}", "method": "GET", "status": "4xx"},
+    )
+    assert value == 2.0
+
+
+async def test_lifespan_starts_and_stops_metrics_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When enabled, the lifespan starts the exposition server on the
+    configured port/addr/registry and shuts it down on teardown."""
+    calls: dict[str, object] = {}
+    events: list[str] = []
+
+    class _FakeServer:
+        def shutdown(self) -> None:
+            events.append("shutdown")
+
+        def server_close(self) -> None:
+            events.append("server_close")
+
+    def _fake_start(port: int, *, addr: str, registry: object) -> tuple[object, None]:
+        calls["port"] = port
+        calls["addr"] = addr
+        calls["registry"] = registry
+        return _FakeServer(), None
+
+    monkeypatch.setattr("bscribe.app.start_http_server", _fake_start)
+    app = create_app(Settings(metrics_enabled=True, metrics_port=9271))
+
+    async with app.router.lifespan_context(app):
+        assert calls["port"] == 9271
+        assert calls["registry"] is app.state.metrics_registry
+        assert events == []
+
+    # Loop stopped, then the listening socket released — in that order.
+    assert events == ["shutdown", "server_close"]
+
+
+async def test_lifespan_metrics_bind_failure_still_tears_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A metrics-port bind failure at startup must not leak the purge task or
+    worker pool — the server is started inside the try so the finally runs."""
+
+    def _boom(*_args: object, **_kwargs: object) -> tuple[object, None]:
+        raise OSError("metrics port already in use")
+
+    monkeypatch.setattr("bscribe.app.start_http_server", _boom)
+    app = create_app(Settings(metrics_enabled=True))
+
+    with pytest.raises(OSError, match="metrics port"):
+        async with app.router.lifespan_context(app):
+            pass
+
+    # Teardown ran: purge task cancelled, pool closed (close() is idempotent).
+    assert app.state.purge_task.done()
+    app.state.worker_pool.close()
+
+
+async def test_lifespan_skips_metrics_server_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started: list[None] = []
+
+    def _fake_start(*_args: object, **_kwargs: object) -> tuple[object, None]:
+        started.append(None)
+        raise AssertionError("start_http_server must not be called when disabled")
+
+    monkeypatch.setattr("bscribe.app.start_http_server", _fake_start)
+    app = create_app(Settings())  # conftest disables metrics
+
+    async with app.router.lifespan_context(app):
+        pass
+
+    assert started == []

@@ -8,9 +8,10 @@ a document (docs/design.md — Re-ingestion contract). The body is the same
 endpoint field-for-field.
 
 Token-scoped like every other ``/v1`` route: the pipeline identity is the
-stability contract bsearch connectors hold a token to build against; only
-``/healthz`` and ``/metrics`` are open. The handler is a sync ``def`` — it
-reads factory-time app state and does no I/O.
+stability contract bsearch connectors hold a token to build against; among
+the app's routes only ``/healthz`` is open (Prometheus ``/metrics`` lives on
+a separate port, not this app — docs/design.md, Monitoring). The handler is a
+sync ``def`` — it reads factory-time app state and does no I/O.
 """
 
 from __future__ import annotations

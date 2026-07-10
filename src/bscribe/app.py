@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 
 import structlog
 from fastapi import FastAPI, Request, Response
+from prometheus_client import CollectorRegistry, start_http_server
+from prometheus_fastapi_instrumentator import Instrumentator
 
 from bscribe import maintenance
 from bscribe.adapters.sqlite import SqliteJobStore, SqliteTokenStore
@@ -19,6 +21,7 @@ from bscribe.errors import (
     register_error_handlers,
 )
 from bscribe.log import configure_logging
+from bscribe.metrics import NoopMetrics, build_metrics
 from bscribe.pipeline import discover_pipeline
 from bscribe.runner import JobRunner
 from bscribe.settings import Settings
@@ -89,6 +92,7 @@ def create_app(
             job_timeout_seconds=float(settings.job_timeout_seconds),
             worker_max_tasks=settings.worker_max_tasks,
             pipeline_info=app.state.pipeline_info,
+            job_observer=app.state.metrics.observe_job,
         )
         app.state.worker_pool = pool
         app.state.purge_task = asyncio.create_task(
@@ -99,9 +103,30 @@ def create_app(
             ),
             name="bscribe-job-purge",
         )
+        # Expose metrics on their own port via prometheus-client's background
+        # WSGI server (a daemon thread), not a route on this app — the scrape
+        # surface stays off the API port (docs/design.md — Monitoring). The
+        # server reads the per-app registry built at factory time. Started
+        # inside the try so a bind failure (e.g. port in use) still runs the
+        # finally teardown below — the purge task and pool already exist.
+        metrics_server = None
         try:
+            if settings.metrics_enabled:
+                metrics_server, _ = start_http_server(
+                    settings.metrics_port,
+                    addr=settings.metrics_addr,
+                    registry=app.state.metrics_registry,
+                )
             yield
         finally:
+            if metrics_server is not None:
+                # shutdown() stops the serve_forever loop but blocks on its
+                # poll interval, so offload it like the pool teardown below;
+                # server_close() then releases the listening socket (shutdown
+                # alone leaks the bound port until process exit — a failed
+                # rebind on any in-process restart).
+                await asyncio.to_thread(metrics_server.shutdown)
+                metrics_server.server_close()
             # Purge task first: cancellation stops any further iterations.
             # An iteration already inside to_thread cannot be interrupted
             # and may finish in the background — harmless: it only issues
@@ -152,6 +177,26 @@ def create_app(
     # which never run the lifespan below; the lifespan's startup_sweep
     # (docs/design.md — Startup sweep) owns wiping it clean at boot.
     settings.scratch_dir.mkdir(parents=True, exist_ok=True)
+
+    # Metrics: build the per-app registry (never the global default — many
+    # apps per test process would double-register), the push handle, and HTTP
+    # instrumentation, all when enabled. instrumentator owns the http_* metrics
+    # (it resolves the route-template handler label); the exposition server is
+    # started in the lifespan. Disabled → a no-op handle, no registry, no
+    # instrumentation, no server (docs/design.md — Monitoring).
+    if settings.metrics_enabled:
+        registry = CollectorRegistry()
+        app.state.metrics_registry = registry
+        app.state.metrics = build_metrics(
+            registry,
+            job_store=app.state.job_store,
+            get_worker_pool=lambda: getattr(app.state, "worker_pool", None),
+            pipeline_info=pipeline_info,
+        )
+        Instrumentator(registry=registry).instrument(app)
+    else:
+        app.state.metrics = NoopMetrics()
+
     register_error_handlers(app)
 
     max_body_bytes = settings.max_upload_bytes + MULTIPART_OVERHEAD_SLACK

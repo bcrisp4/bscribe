@@ -74,6 +74,11 @@ _MIGRATIONS: tuple[str, ...] = (
     # must not treat it as corruption) — only a genuinely missing result_*
     # trio still means external corruption. See _stamp_from_json.
     "ALTER TABLE jobs ADD COLUMN result_pipeline TEXT",
+    # Covering index for count_by_status's `GROUP BY status` (the Prometheus
+    # jobs-by-state scrape, ~every 15s): lets the count run off the index
+    # instead of scanning the table, which otherwise grows with done/failed
+    # rows retained until the TTL purge.
+    "CREATE INDEX jobs_status ON jobs (status)",
 )
 
 
@@ -640,6 +645,22 @@ class SqliteJobStore:
                 (job_id, token_id),
             )
             return cursor.rowcount > 0
+
+    def count_by_status(self) -> dict[JobStatus, int]:
+        """Count all jobs grouped by status, across every token.
+
+        Returns:
+            A mapping from :class:`JobStatus` to its count; states with no
+            jobs are omitted (callers zero-fill).
+        """
+        with _connect(self._db_path) as conn:
+            rows = conn.execute(
+                "SELECT status, COUNT(*) FROM jobs GROUP BY status"
+            ).fetchall()
+        # ``status`` is CHECK-constrained to the JobStatus values, so the cast
+        # never raises; were it to (only DB corruption could), letting it
+        # surface beats silently dropping a state from the metrics.
+        return {JobStatus(status): count for status, count in rows}
 
     def sweep_incomplete(self, detail: str) -> int:
         """Mark every queued/running job failed with ``detail``.

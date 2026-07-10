@@ -117,7 +117,7 @@ flowchart LR
     CLI --> SQ
     WP --> PP --> LP
     LP --> SCRATCH
-    PROM -->|"scrape /metrics"| API
+    PROM -->|"scrape /metrics (separate port, default :9090)"| API
     LP -.->|"POST /ocr"| OCRS -.-> INF
 ```
 
@@ -137,7 +137,7 @@ PDFium and Tesseract appear by name because they are part of the untrusted-input
 | `DELETE /v1/jobs/{id}` | Cancel and purge a job in any state; `204` on success (`404` per the status-code table for unknown or other-token jobs). For `running` jobs the worker process is killed — real cancellation, a direct benefit of the process-pool execution model. |
 | `GET /v1/info` | Service/pipeline identity: current versions of **every** pipeline component (bscribe, liteparse, PDFium, Tesseract/OCR model, ImageMagick, LibreOffice) and the current `pipeline_fingerprint`. Lets callers check "has the pipeline changed?" without submitting a document. |
 | `GET /healthz` | Liveness (no auth). |
-| `GET /metrics` | Prometheus metrics (no auth, tailnet-internal). |
+| `GET /metrics` | Prometheus metrics (no auth, tailnet-internal). Served on a **separate port** (`BSCRIBE_METRICS_PORT`), not the API app — see Monitoring & alerting. |
 
 The API is path-versioned (`/v1`). Breaking changes require `/v2`; additive changes (new optional params, new response fields) do not bump the version. This is the stability contract bsearch connectors rely on.
 
@@ -185,7 +185,7 @@ Content-Type: multipart/form-data
 
 Async: `POST /v1/jobs` → `201 {"id": "…", "status": "queued", …}` — the full job object (submission parameters, timestamps, `failure_detail`); poll `GET /v1/jobs/{id}` for the same object; fetch the same result document as the sync response from `/result`.
 
-`GET /v1/info` returns the bare pipeline block — the same `{fingerprint, components}` shape a result's `metadata.pipeline` carries, but listing **all** components (a result lists only the subset it traversed). Both surfaces report the same `fingerprint`, so a caller compares a stored block against `/v1/info` field-for-field. It is token-scoped like every other `/v1` route; only `/healthz` and `/metrics` are open.
+`GET /v1/info` returns the bare pipeline block — the same `{fingerprint, components}` shape a result's `metadata.pipeline` carries, but listing **all** components (a result lists only the subset it traversed). Both surfaces report the same `fingerprint`, so a caller compares a stored block against `/v1/info` field-for-field. It is token-scoped like every other `/v1` route; on the API port only `/healthz` is open (Prometheus `/metrics` is served on a separate port — see Monitoring & alerting).
 
 ```json
 {
@@ -314,14 +314,15 @@ Documents are the sensitive asset — bank statements, medical letters, IDs. Rul
 
 ## Monitoring & alerting
 
-bscribe joins the existing Prometheus/Grafana stack. `/metrics` exposes:
+bscribe joins the existing Prometheus/Grafana stack. Metrics are served on a **separate HTTP port** — prometheus-client's own background server, not a route on the API app — so the unauthenticated scrape surface is isolated from the API port. The port and bind address are configurable (`BSCRIBE_METRICS_PORT`, `BSCRIBE_METRICS_ADDR`), and the whole subsystem is toggled by `BSCRIBE_METRICS_ENABLED` (default on). Metrics exposed:
 
-- HTTP request count + duration histograms, by endpoint and status
+- HTTP request count + duration histograms, labelled by `handler` (route template), `method` and `status` — via `prometheus-fastapi-instrumentator`, which resolves the route template so per-id paths don't explode label cardinality
 - Jobs by state (gauge), job duration histogram (a split by OCR use returns with the deferred `ocr_used` signal — see Closed issues), queue depth
-- Worker pool health: counters for timeout kills, worker crashes, cancellations, recycles
-- A build/pipeline info metric carrying `pipeline_fingerprint` and component versions — a Grafana panel shows at a glance which pipeline version is live
+- Worker pool health: counters for timeout kills, worker crashes, cancellations, pool rebuilds (worker **recycles** need a pebble hook that doesn't exist — deferred, issue #12)
+- A build/pipeline info metric (`bscribe_build_info`) carrying the pipeline fingerprint (label `fingerprint`) and component versions — a Grafana panel shows at a glance which pipeline version is live
+- Process and Python-runtime metrics for the parent process (CPU, memory, fds, GC) from prometheus-client's stdlib collectors — Linux-only at runtime; per-worker (child-process) metrics are deferred to a follow-up
 
-Instrumentation via `prometheus-client` + FastAPI middleware. Alerting stays in the existing stack: `up == 0` on the scrape target is the only alert worth having, per the availability SLO.
+Instrumentation via `prometheus-client` + `prometheus-fastapi-instrumentator`. Alerting stays in the existing stack: `up == 0` on the scrape target is the only alert worth having, per the availability SLO.
 
 ## Logging
 
