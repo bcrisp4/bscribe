@@ -338,3 +338,78 @@ async def test_lifespan_skips_metrics_server_when_disabled(
         pass
 
     assert started == []
+
+
+# --- OpenAPI documentation ------------------------------------------------
+#
+# The generated schema is the machine-readable contract a caller (human or
+# agent) reads from /docs and /openapi.json — these lock in the narrative,
+# the real version, the auth scheme, and honest error documentation.
+
+
+def test_openapi_info_carries_narrative_and_real_version() -> None:
+    """info block explains the service and reports the package version."""
+    import importlib.metadata
+
+    spec = create_app().openapi()
+    info = spec["info"]
+
+    assert info["title"] == "bscribe"
+    assert info["summary"]
+    # Not FastAPI's default "0.1.0" — the setuptools-scm package version.
+    assert info["version"] == importlib.metadata.version("bscribe")
+    # An agent must learn how to authenticate from the description alone.
+    assert "Authorization: Bearer" in info["description"]
+    assert "problem+json" in info["description"]
+
+
+def test_openapi_declares_bearer_auth_on_every_v1_route() -> None:
+    """Every /v1 op requires the bearer scheme; /healthz stays open."""
+    spec = create_app().openapi()
+
+    assert spec["components"]["securitySchemes"]["HTTPBearer"]["scheme"] == "bearer"
+    for path, methods in spec["paths"].items():
+        for method, op in methods.items():
+            secured = bool(op.get("security"))
+            if path.startswith("/v1"):
+                assert secured, f"{method} {path} missing security"
+            else:
+                assert not secured, f"{method} {path} unexpectedly secured"
+
+
+def test_openapi_documents_auth_and_error_responses() -> None:
+    """Convert documents its full problem+json failure ladder, incl. 401."""
+    spec = create_app().openapi()
+
+    convert = spec["paths"]["/v1/convert"]["post"]["responses"]
+    assert {"400", "401", "413", "415", "422", "500"} <= set(convert)
+    problem_ref = "#/components/schemas/Problem"
+    assert (
+        convert["401"]["content"]["application/json"]["schema"]["$ref"] == problem_ref
+    )
+
+
+def test_openapi_prunes_default_validation_422() -> None:
+    """FastAPI's framework-default 422 is stripped; bscribe returns 400."""
+    spec = create_app().openapi()
+
+    # bscribe never returns HTTPValidationError — validation failures are 400.
+    schemas = spec["components"]["schemas"]
+    assert "HTTPValidationError" not in schemas
+    assert "ValidationError" not in schemas
+    # A param-only route keeps no 422 at all.
+    assert "422" not in spec["paths"]["/v1/jobs/{job_id}"]["get"]["responses"]
+    # The route that genuinely returns 422 (unparseable) keeps its own,
+    # bodied by Problem rather than the pruned framework schema.
+    assert "422" in spec["paths"]["/v1/convert"]["post"]["responses"]
+
+
+def test_openapi_generation_is_idempotent() -> None:
+    """Re-running the post-processor over the cached schema is a no-op."""
+    app = create_app()
+
+    first = app.openapi()
+    second = app.openapi()
+
+    assert first == second
+    assert "HTTPValidationError" not in second["components"]["schemas"]

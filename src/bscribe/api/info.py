@@ -28,8 +28,18 @@ router = APIRouter(tags=["info"])
 # the principal (nothing here is token-scoped), so ``require_token`` runs via
 # ``dependencies`` rather than binding an unused parameter.
 @router.get(
-    "/info", response_model=PipelineBlock, dependencies=[Depends(require_token)]
+    "/info",
+    response_model=PipelineBlock,
+    summary="Current pipeline identity",
+    dependencies=[Depends(require_token)],
 )
 def info(request: Request) -> PipelineBlock:
-    """Return the current pipeline fingerprint and all component versions."""
+    """Return the current pipeline fingerprint and all component versions.
+
+    The `fingerprint` is a hash over every output-affecting component
+    version; `components` maps each component to its version. Store the
+    fingerprint alongside an ingested document and compare it here to detect
+    whether the conversion pipeline changed — without re-submitting the
+    document. Same shape as a result's `metadata.pipeline` block.
+    """
     return PipelineBlock.from_stamp(request.app.state.pipeline_info)

@@ -17,6 +17,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 
+from bscribe.api.responses import error_responses
 from bscribe.api.schemas import ConvertResponse
 from bscribe.api.staging import stage_upload
 from bscribe.auth import require_token
@@ -28,7 +29,12 @@ from bscribe.domain.models import OcrMode, OutputFormat, Token
 router = APIRouter(tags=["convert"])
 
 
-@router.post("/convert", response_model=ConvertResponse)
+@router.post(
+    "/convert",
+    response_model=ConvertResponse,
+    summary="Convert a document synchronously",
+    responses=error_responses(400, 413, 415, 422, 500),
+)
 async def convert(
     request: Request,
     token: Annotated[Token, Depends(require_token)],
@@ -36,7 +42,18 @@ async def convert(
     output: Annotated[OutputFormat, Form()] = OutputFormat.MARKDOWN,
     ocr: Annotated[OcrMode, Form()] = OcrMode.AUTO,
 ) -> ConvertResponse:
-    """Convert one uploaded document and return the result inline."""
+    """Convert one uploaded document and return the extracted text inline.
+
+    Upload the document as multipart `file`; choose `output` (`markdown` or
+    `text`) and `ocr` (`auto` or `off`). The response carries the converted
+    `content` plus `metadata` (page count, duration, and the pipeline block
+    the document traversed). The upload is deleted as soon as parsing
+    finishes.
+
+    Runs on the same bounded worker pool as async jobs, so a request waits
+    for a free slot and then against the per-job timeout — send OCR-heavy or
+    large documents to `POST /v1/jobs` instead.
+    """
     settings = request.app.state.settings
     pool = request.app.state.worker_pool
 

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
 import time
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 from fastapi import FastAPI, Request, Response
@@ -40,6 +41,151 @@ logger = structlog.get_logger()
 # max-size upload. The streaming counter in spool_upload is the authoritative
 # limit; this prefilter only rejects egregious bodies before receipt.
 MULTIPART_OVERHEAD_SLACK = 1 << 20
+
+# One-line service summary shown at the top of the OpenAPI docs.
+_API_SUMMARY = "Convert documents (PDF, office formats, images) to text or markdown."
+
+# The app-level OpenAPI description. Markdown, rendered at the top of /docs and
+# carried in /openapi.json — written so a caller (human or agent) can use the
+# API from this text alone: what it does, how to authenticate, the error
+# format, and the endpoint map. Kept in step with docs/design.md.
+_API_DESCRIPTION = """\
+**bscribe** is a self-hosted service that converts documents — PDFs, office
+formats (Word/Excel/PowerPoint, OpenDocument, RTF, CSV, iWork), and images
+(JPG/PNG/GIF/BMP/TIFF/WebP/SVG) — into plain **text** or **markdown**.
+
+## Authentication
+
+Every `/v1` endpoint requires a **bearer token**:
+
+```
+Authorization: Bearer <token>
+```
+
+Tokens are provisioned out-of-band by the operator's local admin CLI, never
+over HTTP. A missing or invalid token returns `401`. In this page, click
+**Authorize** and paste your token to try the endpoints. Only `/healthz`
+(liveness) is unauthenticated.
+
+## Using the API
+
+* **`POST /v1/convert`** — synchronous: upload a document, get the extracted
+  text back inline. Best for interactive or small documents.
+* **`POST /v1/jobs`** — asynchronous: same parameters, returns a job id
+  immediately; poll `GET /v1/jobs/{id}/result` for the result. Use this for
+  OCR-heavy or large documents that may exceed request timeouts.
+* **`GET /v1/info`** — the current pipeline fingerprint and component
+  versions, so a caller can detect whether the conversion pipeline changed
+  without submitting a document.
+
+Conversion parameters (both convert endpoints): `file` (multipart, required),
+`output` = `markdown` (default) or `text`, and `ocr` = `auto` (default) or
+`off`.
+
+## Errors
+
+All error responses are RFC 9457 `application/problem+json`:
+
+```json
+{ "type": "about:blank", "title": "Unauthorized", "status": 401,
+  "detail": "Invalid or missing bearer token" }
+```
+
+Detail strings come from a fixed vocabulary and never echo document content.
+Each operation below lists the status codes it can return.
+"""
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    """Return ``value`` if it is a mapping, else an empty one.
+
+    Walking a freshly built OpenAPI schema means threading through ``Any``;
+    this keeps each hop typed as ``dict[str, Any]`` (so member access stays
+    known) and coerces non-mapping nodes to ``{}``. A real mapping is
+    returned as-is (not copied), so mutating the result mutates the schema.
+    """
+    return cast("dict[str, Any]", value) if isinstance(value, dict) else {}
+
+
+def _prune_default_validation_responses(schema: dict[str, Any]) -> None:
+    """Drop FastAPI's auto-injected ``422`` validation responses.
+
+    bscribe remaps request-validation failures to ``400`` problem+json
+    (:mod:`bscribe.errors`), so the framework-default ``422`` /
+    ``HTTPValidationError`` that FastAPI attaches to every parameterised
+    route misrepresents the contract — ``docs/design.md`` reserves ``422``
+    for "supported format, document unparseable". Remove any ``422`` still
+    bodied by ``HTTPValidationError`` (the routes that genuinely return
+    ``422`` document it explicitly with :class:`~bscribe.api.responses.Problem`,
+    which is left untouched), then drop the now-orphaned validation schemas.
+
+    Idempotent: run against an already-pruned schema, it finds nothing.
+    """
+    validation_ref = "#/components/schemas/HTTPValidationError"
+    # A path item also holds non-operation keys (a `parameters` list, a
+    # `summary` string); _as_dict coerces those to an empty mapping so the
+    # walk skips them without per-key isinstance narrowing.
+    for methods in _as_dict(schema.get("paths")).values():
+        for operation in _as_dict(methods).values():
+            responses = _as_dict(_as_dict(operation).get("responses"))
+            entry = _as_dict(responses.get("422"))
+            body = _as_dict(_as_dict(entry.get("content")).get("application/json")).get(
+                "schema"
+            )
+            if _as_dict(body).get("$ref") == validation_ref:
+                responses.pop("422", None)
+    schemas = _as_dict(_as_dict(schema.get("components")).get("schemas"))
+    for name in ("HTTPValidationError", "ValidationError"):
+        schemas.pop(name, None)
+
+
+def _install_openapi(app: FastAPI) -> None:
+    """Wrap ``app.openapi`` to post-process the generated schema.
+
+    FastAPI builds and caches the schema on first access; we call the
+    original, prune the misleading default validation responses in place
+    (the cached dict), and return it.
+    """
+    original = app.openapi
+
+    def openapi() -> dict[str, Any]:
+        schema = original()
+        _prune_default_validation_responses(schema)
+        return schema
+
+    # Reassigning app.openapi is FastAPI's documented customization hook;
+    # mypy flags method assignment, pyright does not.
+    app.openapi = openapi  # type: ignore[method-assign]
+
+
+def _package_version() -> str:
+    """Return the installed bscribe version for the OpenAPI ``info.version``.
+
+    Read from installed distribution metadata (setuptools-scm stamps it from
+    the git tag) rather than FastAPI's default ``0.1.0``. Falls back to
+    ``0.0.0`` if the distribution metadata is somehow absent (e.g. running
+    from an unbuilt tree) so doc generation never fails on this.
+    """
+    try:
+        return importlib.metadata.version("bscribe")
+    except importlib.metadata.PackageNotFoundError:
+        return "0.0.0"
+
+
+# Per-tag descriptions, surfaced as section headers in the docs. Tags match the
+# `tags=` on each router (convert / jobs / info).
+_OPENAPI_TAGS = [
+    {"name": "convert", "description": "Synchronous, inline document conversion."},
+    {
+        "name": "jobs",
+        "description": "Asynchronous conversion jobs — submit, poll, cancel. "
+        "Every job is scoped to the token that created it.",
+    },
+    {
+        "name": "info",
+        "description": "Pipeline identity for the re-ingestion contract.",
+    },
+]
 
 
 def create_app(
@@ -144,7 +290,14 @@ def create_app(
             finally:
                 await pool.aclose()
 
-    app = FastAPI(title="bscribe", lifespan=lifespan)
+    app = FastAPI(
+        title="bscribe",
+        summary=_API_SUMMARY,
+        description=_API_DESCRIPTION,
+        version=_package_version(),
+        openapi_tags=_OPENAPI_TAGS,
+        lifespan=lifespan,
+    )
     app.state.settings = settings
     # Factory-time (not lifespan): construction is cheap, creates the schema
     # if missing, and tests can swap in a fake before serving a request.
@@ -249,5 +402,7 @@ def create_app(
         return {"status": "ok"}
 
     app.include_router(v1_router)
+
+    _install_openapi(app)
 
     return app
