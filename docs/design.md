@@ -117,7 +117,7 @@ flowchart LR
     CLI --> SQ
     WP --> PP --> LP
     LP --> SCRATCH
-    PROM -->|"scrape /metrics"| API
+    PROM -->|"scrape /metrics (separate port, default :9090)"| API
     LP -.->|"POST /ocr"| OCRS -.-> INF
 ```
 
