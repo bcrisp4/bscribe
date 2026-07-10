@@ -19,6 +19,7 @@ from bscribe.domain.errors import (
 from bscribe.domain.models import OcrMode, OutputFormat, ParsedDocument
 from bscribe.domain.tokens import mint_token
 from bscribe.settings import Settings
+from tests.unit.fakes import CANNED_PIPELINE_STAMP
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -52,7 +53,10 @@ class FakePool:
         exc: Exception | None = None,
     ) -> None:
         self._result = result or ParsedDocument(
-            content="# Heading", pages=3, duration_ms=41.7
+            content="# Heading",
+            pages=3,
+            duration_ms=41.7,
+            pipeline=CANNED_PIPELINE_STAMP,
         )
         self._exc = exc
         self.calls: list[_ParseCall] = []
@@ -117,8 +121,33 @@ class TestConvertSuccess:
         assert response.json() == {
             "output": "markdown",
             "content": "# Heading",
-            "metadata": {"pages": 3, "duration_ms": 42},
+            "metadata": {
+                "pages": 3,
+                "duration_ms": 42,
+                "pipeline": {
+                    "fingerprint": "fakefinger12",
+                    "components": {
+                        "bscribe": "0.0.0-test",
+                        "liteparse": "0.0.0-test",
+                    },
+                },
+            },
         }
+
+    async def test_unstamped_result_yields_null_pipeline(self, tmp_path: Path) -> None:
+        # A pre-M3.1 stored async result round-trips as pipeline=None; the
+        # wire carries an explicit null rather than dropping the field.
+        pool = FakePool(result=ParsedDocument(content="x", pages=1, duration_ms=1.0))
+        app = make_app(tmp_path, pool=pool)[0]
+        secret = issue_token(app)
+        async with make_client(app) as client:
+            response = await client.post(
+                "/v1/convert",
+                files={"file": ("sample.pdf", PDF_BYTES, "application/pdf")},
+                headers={"Authorization": f"Bearer {secret}"},
+            )
+        assert response.status_code == 200
+        assert response.json()["metadata"]["pipeline"] is None
 
     async def test_scratch_dir_empty_after_success(self, tmp_path: Path) -> None:
         app = make_app(tmp_path)[0]

@@ -185,6 +185,25 @@ Content-Type: multipart/form-data
 
 Async: `POST /v1/jobs` → `201 {"id": "…", "status": "queued", …}` — the full job object (submission parameters, timestamps, `failure_detail`); poll `GET /v1/jobs/{id}` for the same object; fetch the same result document as the sync response from `/result`.
 
+`GET /v1/info` returns the bare pipeline block — the same `{fingerprint, components}` shape a result's `metadata.pipeline` carries, but listing **all** components (a result lists only the subset it traversed). Both surfaces report the same `fingerprint`, so a caller compares a stored block against `/v1/info` field-for-field. It is token-scoped like every other `/v1` route; only `/healthz` and `/metrics` are open.
+
+```json
+{
+  "fingerprint": "17c97f8dee98",
+  "components": {
+    "bscribe": "0.2.0",
+    "liteparse": "2.5.0",
+    "pdfium": "bundled (liteparse 2.5.0)",
+    "tesseract": "bundled (liteparse 2.5.0)",
+    "tessdata": "sha256:cbc251c70db9",
+    "imagemagick": "6.9.11-60",
+    "libreoffice": "7.4.7.2",
+    "ghostscript": "10.00.0",
+    "librsvg": "2.54.7"
+  }
+}
+```
+
 Errors: RFC 9457 `application/problem+json` (`{"type", "title", "status", "detail"}`).
 
 Status code usage (audited against RFC 9110; the pattern for async polling follows the standard request-reply convention — `202` while in progress):

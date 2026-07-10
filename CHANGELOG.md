@@ -11,6 +11,18 @@ section is renamed to the new version and becomes the GitHub Release notes.
 
 ## [Unreleased]
 
+### Added
+
+- `GET /v1/info` reports the current pipeline fingerprint and the version of
+  every pipeline component, so you can check whether the conversion pipeline
+  has changed without submitting a document. Requires a bearer token.
+- Every conversion result now carries a `pipeline` block in its metadata (both
+  the synchronous `POST /v1/convert` response and the stored
+  `GET /v1/jobs/{id}/result`): the fingerprint plus the components the document
+  actually traversed, with versions. Store it alongside each ingested document
+  and re-parse when a component on that document's path changes version, using
+  the `GET /v1/info` fingerprint as a cheap short-circuit.
+
 ## [0.2.0] - 2026-07-08
 
 ### Added

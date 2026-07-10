@@ -25,7 +25,7 @@ from bscribe.domain.models import (
 from bscribe.domain.tokens import mint_token
 from bscribe.errors import JOB_FAILED_NO_RESULT_DETAIL, UNPARSEABLE_DETAIL
 from bscribe.settings import Settings
-from tests.unit.fakes import FakeJobStore, GatedPool
+from tests.unit.fakes import CANNED_PIPELINE_STAMP, FakeJobStore, GatedPool
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -355,7 +355,12 @@ class TestGetJobResult:
             app,
             token.id,
             status=JobStatus.DONE,
-            result=ParsedDocument(content="# Heading", pages=3, duration_ms=41.7),
+            result=ParsedDocument(
+                content="# Heading",
+                pages=3,
+                duration_ms=41.7,
+                pipeline=CANNED_PIPELINE_STAMP,
+            ),
         )
         async with make_client(app) as client:
             response = await client.get(
@@ -363,12 +368,42 @@ class TestGetJobResult:
                 headers={"Authorization": f"Bearer {secret}"},
             )
         assert response.status_code == 200
-        # Same document shape the sync endpoint returns inline.
+        # Same document shape the sync endpoint returns inline, pipeline block
+        # carrying the as-of-parse-time stamp.
         assert response.json() == {
             "output": "markdown",
             "content": "# Heading",
-            "metadata": {"pages": 3, "duration_ms": 42},
+            "metadata": {
+                "pages": 3,
+                "duration_ms": 42,
+                "pipeline": {
+                    "fingerprint": "fakefinger12",
+                    "components": {
+                        "bscribe": "0.0.0-test",
+                        "liteparse": "0.0.0-test",
+                    },
+                },
+            },
         }
+
+    async def test_pre_m3_1_result_has_null_pipeline(self, tmp_path: Path) -> None:
+        # A job completed before migration 4 round-trips as pipeline=None; the
+        # result body carries an explicit null rather than dropping the field.
+        app = make_app(tmp_path)[0]
+        token, secret = issue_token(app)
+        job = seed_job(
+            app,
+            token.id,
+            status=JobStatus.DONE,
+            result=ParsedDocument(content="x", pages=1, duration_ms=1.0),
+        )
+        async with make_client(app) as client:
+            response = await client.get(
+                f"/v1/jobs/{job.id}/result",
+                headers={"Authorization": f"Bearer {secret}"},
+            )
+        assert response.status_code == 200
+        assert response.json()["metadata"]["pipeline"] is None
 
     async def test_failed_job_is_409_problem(self, tmp_path: Path) -> None:
         app = make_app(tmp_path)[0]

@@ -9,10 +9,11 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from bscribe.api import convert, jobs
+from bscribe.api import convert, info, jobs
 
 v1_router = APIRouter(prefix="/v1")
 v1_router.include_router(convert.router)
+v1_router.include_router(info.router)
 v1_router.include_router(jobs.router)
 
 __all__ = ["v1_router"]

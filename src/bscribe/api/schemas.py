@@ -1,9 +1,9 @@
 """Pydantic wire models for the conversion API.
 
 Kept separate from the domain dataclasses (``ParsedDocument``, ``Job``):
-these are the HTTP contract. The M3 ``pipeline`` block and the deferred
-``ocr_used`` signal are deliberately absent (docs/design.md — Interfaces,
-Closed issues).
+these are the HTTP contract. The deferred ``ocr_used`` signal is
+deliberately absent (docs/design.md — Closed issues); the ``pipeline``
+block on results carries the re-ingestion contract instead.
 """
 
 from __future__ import annotations
@@ -18,7 +18,34 @@ from pydantic import BaseModel
 from bscribe.domain.models import JobStatus, OcrMode, OutputFormat
 
 if TYPE_CHECKING:
-    from bscribe.domain.models import Job, ParsedDocument
+    from bscribe.domain.models import Job, ParsedDocument, PipelineStamp
+
+
+class PipelineBlock(BaseModel):
+    """The pipeline identity a caller stores for the re-ingestion contract.
+
+    Same shape in two places: as ``metadata.pipeline`` on a result it lists
+    the components that document actually traversed; as the ``GET /v1/info``
+    body it lists every component. The ``fingerprint`` is identical in both
+    — a hash over *all* component versions, not just the listed subset — so
+    callers compare a stored block against ``/v1/info`` field-for-field
+    (docs/design.md — Re-ingestion contract).
+    """
+
+    fingerprint: str
+    components: dict[str, str]
+
+    @classmethod
+    def from_stamp(cls, stamp: PipelineStamp) -> PipelineBlock:
+        """Map a domain :class:`PipelineStamp` onto the wire model.
+
+        Args:
+            stamp: The app-wide or per-document stamp.
+
+        Returns:
+            The equivalent wire representation.
+        """
+        return cls(fingerprint=stamp.fingerprint, components=dict(stamp.components))
 
 
 class ConvertMetadata(BaseModel):
@@ -26,6 +53,9 @@ class ConvertMetadata(BaseModel):
 
     pages: int
     duration_ms: int
+    # ``None`` only for a pre-M3.1 stored async result (NULL ``result_pipeline``);
+    # every freshly parsed document carries its traversed stamp.
+    pipeline: PipelineBlock | None = None
 
 
 class ConvertResponse(BaseModel):
@@ -60,7 +90,13 @@ class ConvertResponse(BaseModel):
             output=output,
             content=result.content,
             metadata=ConvertMetadata(
-                pages=result.pages, duration_ms=round(result.duration_ms)
+                pages=result.pages,
+                duration_ms=round(result.duration_ms),
+                pipeline=(
+                    PipelineBlock.from_stamp(result.pipeline)
+                    if result.pipeline is not None
+                    else None
+                ),
             ),
         )
 
