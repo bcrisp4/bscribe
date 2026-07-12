@@ -4,11 +4,6 @@ Self-hosted HTTP service that converts documents (PDFs, office documents,
 images) into plain text or markdown, for consumption by other self-hosted
 services. See [docs/design.md](docs/design.md) for the full design.
 
-> **Status:** M1 in progress. Synchronous conversion (`POST /v1/convert`),
-> bearer-token auth, and the `bscribe` CLI have landed; async jobs, the
-> re-ingestion contract, and metrics arrive in M2–M3 (see the design's
-> milestones).
-
 ## Quick start
 
 Requires [uv](https://docs.astral.sh/uv/) and Python 3.14.
