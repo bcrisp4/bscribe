@@ -11,6 +11,10 @@ section is renamed to the new version and becomes the GitHub Release notes.
 
 ## [Unreleased]
 
+### Dependencies
+
+- Bump `anyio` from 4.14.1 to 4.14.2 ([#64](https://github.com/bcrisp4/bscribe/pull/64))
+
 ## [0.3.1] - 2026-07-09
 
 ### Changed
