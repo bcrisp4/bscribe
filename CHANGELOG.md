@@ -11,6 +11,10 @@ section is renamed to the new version and becomes the GitHub Release notes.
 
 ## [Unreleased]
 
+### Dependencies
+
+- Bump `mypy` from 2.1.0 to 2.3.0 ([#62](https://github.com/bcrisp4/bscribe/pull/62))
+
 ## [0.3.1] - 2026-07-09
 
 ### Changed
