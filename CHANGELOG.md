@@ -11,6 +11,10 @@ section is renamed to the new version and becomes the GitHub Release notes.
 
 ## [Unreleased]
 
+### Dependencies
+
+- Bump `ruff` from 0.15.20 to 0.15.21 ([#63](https://github.com/bcrisp4/bscribe/pull/63))
+
 ## [0.3.1] - 2026-07-09
 
 ### Changed
