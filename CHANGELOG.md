@@ -11,6 +11,10 @@ section is renamed to the new version and becomes the GitHub Release notes.
 
 ## [Unreleased]
 
+### Dependencies
+
+- Bump `liteparse` from 2.5.0 to 2.5.1 ([#65](https://github.com/bcrisp4/bscribe/pull/65))
+
 ## [0.3.1] - 2026-07-09
 
 ### Changed
