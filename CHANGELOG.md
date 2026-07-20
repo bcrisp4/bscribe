@@ -11,6 +11,10 @@ section is renamed to the new version and becomes the GitHub Release notes.
 
 ## [Unreleased]
 
+### Dependencies
+
+- Bump `fastapi` from 0.139.0 to 0.139.2 ([#68](https://github.com/bcrisp4/bscribe/pull/68))
+
 ## [0.3.1] - 2026-07-09
 
 ### Changed
